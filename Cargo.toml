@@ -1,0 +1,12 @@
+[package]
+name = "prust"
+version = "0.1.0"
+edition = "2024"
+description = "PE static analyzer — parses PE files and outputs a triage report"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+# JSON output
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
