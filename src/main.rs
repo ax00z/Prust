@@ -1,5 +1,6 @@
 mod batch;
 mod entropy;
+mod hashes;
 mod overlay;
 mod patterns;
 #[allow(dead_code)]
@@ -41,6 +42,10 @@ struct Cli {
 struct JsonReport {
     file: String,
     file_size: usize,
+    md5: String,
+    sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    imphash: Option<String>,
     machine: String,
     pe_type: String,
     subsystem: String,
@@ -216,16 +221,20 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
+    let file_hashes = hashes::compute(&data, &imports);
+
     let triage = rules::analyze(&coff, &opt, &sections, &imports, &data,
         tls.as_ref(), overlay_info.as_ref(), &pattern_hits);
 
     // ── Output ──
     if cli.json {
         print_json(path, &data, &coff, &opt, &sections, &imports, exports.as_ref(),
-            tls.as_ref(), overlay_info.as_ref(), &extracted_strings, &pattern_hits, triage)?;
+            tls.as_ref(), overlay_info.as_ref(), &extracted_strings, &pattern_hits,
+            &file_hashes, triage)?;
     } else {
         print_text(path, &data, &dos, &coff, &opt, &sections, &imports, exports.as_ref(),
-            tls.as_ref(), overlay_info.as_ref(), &extracted_strings, &pattern_hits, &triage, cli.triage_only);
+            tls.as_ref(), overlay_info.as_ref(), &extracted_strings, &pattern_hits,
+            &file_hashes, &triage, cli.triage_only);
     }
 
     Ok(())
@@ -244,11 +253,15 @@ fn print_json(
     overlay_info: Option<&overlay::OverlayInfo>,
     extracted_strings: &[strings::ExtractedString],
     pattern_hits: &[patterns::PatternHit],
+    file_hashes: &hashes::FileHashes,
     triage: rules::TriageResult,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = JsonReport {
         file: path.to_string(),
         file_size: data.len(),
+        md5: file_hashes.md5.clone(),
+        sha256: file_hashes.sha256.clone(),
+        imphash: file_hashes.imphash.clone(),
         machine: coff.machine_name().to_string(),
         pe_type: if opt.is_pe32_plus() { "PE32+" } else { "PE32" }.to_string(),
         subsystem: opt.subsystem_name().to_string(),
@@ -311,10 +324,20 @@ fn print_text(
     overlay_info: Option<&overlay::OverlayInfo>,
     extracted_strings: &[strings::ExtractedString],
     pattern_hits: &[patterns::PatternHit],
+    file_hashes: &hashes::FileHashes,
     triage: &rules::TriageResult,
     triage_only: bool,
 ) {
     println!("[*] Loaded {} ({} bytes)\n", path, data.len());
+
+    println!("=== Hashes ===");
+    println!("  MD5:     {}", file_hashes.md5);
+    println!("  SHA256:  {}", file_hashes.sha256);
+    match &file_hashes.imphash {
+        Some(h) => println!("  Imphash: {h}"),
+        None    => println!("  Imphash: (no imports)"),
+    }
+    println!();
 
     if !triage_only {
         println!("=== DOS Header ===");
