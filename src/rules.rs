@@ -5,7 +5,9 @@
 // The triage score is the sum of all severities.
 
 use crate::entropy;
-use crate::pe::{self, CoffHeader, ImportEntry, OptionalHeader, SectionHeader};
+use crate::overlay::OverlayInfo;
+use crate::patterns::PatternHit;
+use crate::pe::{CoffHeader, ImportEntry, OptionalHeader, SectionHeader, TlsInfo};
 
 use serde::Serialize;
 
@@ -44,12 +46,16 @@ impl TriageResult {
 // ──────────────────────────────────────────────
 
 /// Run all detection rules and return the aggregated triage result.
+#[allow(clippy::too_many_arguments)]
 pub fn analyze(
     coff: &CoffHeader,
     opt: &OptionalHeader,
     sections: &[SectionHeader],
     imports: &[ImportEntry],
     file_data: &[u8],
+    tls: Option<&TlsInfo>,
+    overlay: Option<&OverlayInfo>,
+    pattern_hits: &[PatternHit],
 ) -> TriageResult {
     let mut findings = Vec::new();
 
@@ -64,7 +70,9 @@ pub fn analyze(
     check_zero_entry_point(opt, coff, &mut findings);
     check_section_size_mismatch(sections, &mut findings);
     check_executable_data_section(sections, &mut findings);
-    check_tls_callbacks(opt, &mut findings);
+    check_tls_callbacks(tls, &mut findings);
+    check_overlay(overlay, &mut findings);
+    check_patterns(pattern_hits, &mut findings);
 
     let score: u32 = findings.iter().map(|f| f.severity).sum();
     let verdict = TriageResult::verdict_from_score(score);
@@ -350,17 +358,55 @@ fn check_executable_data_section(sections: &[SectionHeader], findings: &mut Vec<
     }
 }
 
-fn check_tls_callbacks(opt: &OptionalHeader, findings: &mut Vec<Finding>) {
-    let has_tls = opt.data_directories
-        .get(pe::DIR_TLS)
-        .is_some_and(|d| d.virtual_address != 0);
-
-    if has_tls {
+fn check_tls_callbacks(tls: Option<&TlsInfo>, findings: &mut Vec<Finding>) {
+    if let Some(info) = tls {
+        let count = info.callbacks.len();
         findings.push(Finding {
             rule: "TLS_CALLBACKS",
-            severity: 4,
-            description: "Binary has TLS directory — may execute code before entry point \
-                via TLS callbacks".to_string(),
+            severity: if count > 2 { 7 } else { 4 },
+            description: format!(
+                "Binary has {} TLS callback{} — code executes before entry point",
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+        });
+    }
+}
+
+/// Large overlay with high entropy is a strong packer/dropper signal.
+fn check_overlay(overlay: Option<&OverlayInfo>, findings: &mut Vec<Finding>) {
+    if let Some(info) = overlay {
+        if info.entropy >= 7.0 && info.size >= 4096 {
+            findings.push(Finding {
+                rule: "HIGH_ENTROPY_OVERLAY",
+                severity: 7,
+                description: format!(
+                    "Overlay at offset 0x{:X} ({} bytes, entropy {:.2}) — \
+                    likely packed/encrypted payload",
+                    info.offset, info.size, info.entropy
+                ),
+            });
+        } else if info.size >= 4096 {
+            findings.push(Finding {
+                rule: "OVERLAY_DATA",
+                severity: 2,
+                description: format!(
+                    "File has {} bytes of overlay data at offset 0x{:X} (entropy {:.2})",
+                    info.size, info.offset, info.entropy
+                ),
+            });
+        }
+    }
+}
+
+/// Each pattern hit becomes one finding. Severity and description come
+/// from the pattern definition.
+fn check_patterns(hits: &[PatternHit], findings: &mut Vec<Finding>) {
+    for h in hits {
+        findings.push(Finding {
+            rule: h.pattern,
+            severity: h.severity,
+            description: format!("{} (offset 0x{:X})", h.description, h.offset),
         });
     }
 }

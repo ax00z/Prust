@@ -790,6 +790,84 @@ pub fn parse_exports(
 }
 
 // ──────────────────────────────────────────────
+// TLS (Thread Local Storage) Directory
+// ──────────────────────────────────────────────
+//
+// TLS callbacks execute before the entry point — before a debugger can
+// attach. Standard anti-debug and unpacker-stub hiding place.
+//
+// IMAGE_TLS_DIRECTORY uses Virtual Addresses, not RVAs. Convert
+// VA → RVA by subtracting ImageBase, then RVA → file offset.
+//
+// Layout (offsets into the TLS directory):
+//              PE32   PE32+
+//   StartAddressOfRawData   0x00   0x00
+//   EndAddressOfRawData     0x04   0x08
+//   AddressOfIndex          0x08   0x10
+//   AddressOfCallBacks      0x0C   0x18
+//
+// AddressOfCallBacks points to a null-terminated array of function
+// pointers (4 bytes on PE32, 8 on PE32+).
+
+/// Upper bound per binary. Real binaries have 0–2.
+const MAX_TLS_CALLBACKS: usize = 64;
+
+#[derive(Debug, Clone)]
+pub struct TlsInfo {
+    pub callbacks: Vec<u64>,
+}
+
+pub fn parse_tls(
+    data: &[u8],
+    tls_rva: u32,
+    sections: &[SectionHeader],
+    image_base: u64,
+    is_pe32_plus: bool,
+) -> Option<TlsInfo> {
+    let tls_offset = rva_to_offset(tls_rva, sections)?;
+
+    let callbacks_va = if is_pe32_plus {
+        read_u64_at(data, tls_offset + 0x18, "TLS.AddressOfCallBacks").ok()?
+    } else {
+        u64::from(read_u32_at(data, tls_offset + 0x0C, "TLS.AddressOfCallBacks").ok()?)
+    };
+
+    if callbacks_va == 0 {
+        return None;
+    }
+
+    // VA → RVA → file offset. `checked_sub` guards against crafted VAs
+    // below ImageBase; `try_from` guards against RVAs that don't fit u32.
+    let callbacks_rva = u32::try_from(callbacks_va.checked_sub(image_base)?).ok()?;
+    let callbacks_offset = rva_to_offset(callbacks_rva, sections)?;
+
+    let mut callbacks = Vec::new();
+    let ptr_size = if is_pe32_plus { 8 } else { 4 };
+
+    for i in 0..MAX_TLS_CALLBACKS {
+        let entry_offset = callbacks_offset + i * ptr_size;
+
+        let cb_va = if is_pe32_plus {
+            read_u64_at(data, entry_offset, "TLS callback entry").ok()?
+        } else {
+            u64::from(read_u32_at(data, entry_offset, "TLS callback entry").ok()?)
+        };
+
+        if cb_va == 0 {
+            break;
+        }
+
+        callbacks.push(cb_va);
+    }
+
+    if callbacks.is_empty() {
+        return None;
+    }
+
+    Some(TlsInfo { callbacks })
+}
+
+// ──────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────
 

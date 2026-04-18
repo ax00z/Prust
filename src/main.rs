@@ -1,11 +1,16 @@
+mod batch;
 mod entropy;
+mod overlay;
+mod patterns;
 #[allow(dead_code)]
 mod pe;
 mod rules;
+mod strings;
 
 use clap::Parser;
 use serde::Serialize;
 use std::fs;
+use std::path::Path;
 use std::process::ExitCode;
 
 /// Maximum file size we'll load into memory (256 MB).
@@ -20,7 +25,7 @@ const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
     about = "PE static analyzer — parse and triage PE files"
 )]
 struct Cli {
-    /// Path to the PE file to analyze
+    /// Path to a PE file, or a directory to recursively scan
     file: String,
 
     /// Output results as JSON
@@ -46,7 +51,30 @@ struct JsonReport {
     sections: Vec<JsonSection>,
     imports: Vec<JsonImport>,
     export_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls_callbacks: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overlay: Option<JsonOverlay>,
+    string_count: usize,
+    interesting_strings: Vec<String>,
+    pattern_hits: Vec<JsonPatternHit>,
     triage: rules::TriageResult,
+}
+
+#[derive(Serialize)]
+struct JsonPatternHit {
+    pattern: &'static str,
+    severity: u32,
+    offset: String,
+    description: &'static str,
+}
+
+#[derive(Serialize)]
+struct JsonOverlay {
+    offset: usize,
+    size: usize,
+    entropy: f64,
+    entropy_label: String,
 }
 
 #[derive(Serialize)]
@@ -66,6 +94,48 @@ struct JsonImport {
     functions: Vec<String>,
 }
 
+/// Patterns that are interesting in a malware triage context.
+/// These cover C2 infrastructure, persistence mechanisms, shell commands,
+/// credential access, and other suspicious indicators.
+const INTERESTING_PATTERNS: &[&str] = &[
+    "http://", "https://", "ftp://",
+    "cmd.exe", "powershell", "wscript", "cscript", "mshta",
+    "HKLM\\", "HKCU\\", "CurrentVersion\\Run",
+    "\\AppData\\", "\\Temp\\", "\\System32\\",
+    ".dll", ".exe", ".bat", ".ps1", ".vbs",
+    "password", "credential", "token", "secret",
+    "CreateRemoteThread", "VirtualAlloc", "WriteProcessMemory",
+    "NtUnmapViewOfSection", "IsDebuggerPresent",
+    "socket", "connect", "recv", "send",
+    "SELECT ", "INSERT ", "DELETE ", "DROP ",
+];
+
+/// Maximum number of interesting strings to include in output.
+/// Keeps the report focused — analysts don't want to scroll through 500 strings.
+const MAX_INTERESTING_STRINGS: usize = 100;
+
+/// Filter extracted strings down to those matching suspicious patterns.
+fn filter_interesting(strings: &[strings::ExtractedString]) -> Vec<String> {
+    let mut result = Vec::new();
+    for s in strings {
+        // `to_ascii_lowercase()` returns a new String with ASCII characters
+        // lowered. We use this instead of `to_lowercase()` because we only
+        // care about ASCII patterns, and the ASCII version is faster (no
+        // Unicode case folding tables).
+        let lower = s.value.to_ascii_lowercase();
+        for pattern in INTERESTING_PATTERNS {
+            if lower.contains(&pattern.to_ascii_lowercase()) {
+                result.push(format!("0x{:08X} [{}] {}", s.offset, s.encoding, s.value));
+                break; // One match is enough — don't duplicate the string
+            }
+        }
+        if result.len() >= MAX_INTERESTING_STRINGS {
+            break;
+        }
+    }
+    result
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -82,9 +152,19 @@ fn main() -> ExitCode {
 fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let path = &cli.file;
 
-    // Check file size before reading into memory.
-    let metadata = fs::metadata(path)
+    // Directory mode: recursively scan and print a summary table.
+    // We check this BEFORE the size check because directories have no
+    // meaningful `len()` and we want different code paths entirely.
+    let meta_check = fs::metadata(path)
         .map_err(|e| format!("cannot stat {path}: {e}"))?;
+    if meta_check.is_dir() {
+        let mut entries = batch::scan_directory(Path::new(path));
+        batch::print_summary(&mut entries);
+        return Ok(());
+    }
+
+    // Check file size before reading into memory.
+    let metadata = meta_check;
     if metadata.len() > MAX_FILE_SIZE {
         return Err(format!(
             "{path} is {} bytes — exceeds {} byte limit",
@@ -115,13 +195,37 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .filter(|d| d.virtual_address != 0)
         .and_then(|d| pe::parse_exports(&data, d.virtual_address, &sections));
 
-    let triage = rules::analyze(&coff, &opt, &sections, &imports, &data);
+    let tls = opt.data_directories.get(pe::DIR_TLS)
+        .filter(|d| d.virtual_address != 0)
+        .and_then(|d| pe::parse_tls(&data, d.virtual_address, &sections, opt.image_base, opt.is_pe32_plus()));
+
+    let overlay_info = overlay::detect_overlay(&data, &sections);
+
+    let extracted_strings = strings::extract_all(&data);
+
+    // Scan patterns from the first section onward to avoid false-positive
+    // MZ/PE hits in the loader's own header region.
+    let scan_start = patterns::first_section_offset(&sections).min(data.len());
+    let pattern_hits = patterns::scan_all(&data[scan_start..], &patterns::builtin_patterns());
+    // Adjust hit offsets back to absolute file offsets.
+    let pattern_hits: Vec<patterns::PatternHit> = pattern_hits
+        .into_iter()
+        .map(|mut h| {
+            h.offset += scan_start;
+            h
+        })
+        .collect();
+
+    let triage = rules::analyze(&coff, &opt, &sections, &imports, &data,
+        tls.as_ref(), overlay_info.as_ref(), &pattern_hits);
 
     // ── Output ──
     if cli.json {
-        print_json(path, &data, &coff, &opt, &sections, &imports, exports.as_ref(), triage)?;
+        print_json(path, &data, &coff, &opt, &sections, &imports, exports.as_ref(),
+            tls.as_ref(), overlay_info.as_ref(), &extracted_strings, &pattern_hits, triage)?;
     } else {
-        print_text(path, &data, &dos, &coff, &opt, &sections, &imports, exports.as_ref(), &triage, cli.triage_only);
+        print_text(path, &data, &dos, &coff, &opt, &sections, &imports, exports.as_ref(),
+            tls.as_ref(), overlay_info.as_ref(), &extracted_strings, &pattern_hits, &triage, cli.triage_only);
     }
 
     Ok(())
@@ -136,6 +240,10 @@ fn print_json(
     sections: &[pe::SectionHeader],
     imports: &[pe::ImportEntry],
     exports: Option<&pe::ExportInfo>,
+    tls: Option<&pe::TlsInfo>,
+    overlay_info: Option<&overlay::OverlayInfo>,
+    extracted_strings: &[strings::ExtractedString],
+    pattern_hits: &[patterns::PatternHit],
     triage: rules::TriageResult,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = JsonReport {
@@ -165,6 +273,23 @@ fn print_json(
             functions: i.functions.clone(),
         }).collect(),
         export_count: exports.map_or(0, |e| e.functions.len()),
+        tls_callbacks: tls.map(|t| {
+            t.callbacks.iter().map(|va| format!("0x{va:016X}")).collect()
+        }),
+        overlay: overlay_info.map(|o| JsonOverlay {
+            offset: o.offset,
+            size: o.size,
+            entropy: o.entropy,
+            entropy_label: o.entropy_label.clone(),
+        }),
+        string_count: extracted_strings.len(),
+        interesting_strings: filter_interesting(extracted_strings),
+        pattern_hits: pattern_hits.iter().map(|h| JsonPatternHit {
+            pattern: h.pattern,
+            severity: h.severity,
+            offset: format!("0x{:08X}", h.offset),
+            description: h.description,
+        }).collect(),
         triage,
     };
 
@@ -182,6 +307,10 @@ fn print_text(
     sections: &[pe::SectionHeader],
     imports: &[pe::ImportEntry],
     exports: Option<&pe::ExportInfo>,
+    tls: Option<&pe::TlsInfo>,
+    overlay_info: Option<&overlay::OverlayInfo>,
+    extracted_strings: &[strings::ExtractedString],
+    pattern_hits: &[patterns::PatternHit],
     triage: &rules::TriageResult,
     triage_only: bool,
 ) {
@@ -224,8 +353,8 @@ fn print_text(
         }
 
         println!("\n=== Sections ({}) ===", sections.len());
-        println!("  {:<10} {:>10} {:>10} {:>10} {:>10}  {:<5}  {:>7}  {}",
-            "Name", "VirtSize", "VirtAddr", "RawSize", "RawPtr", "Perms", "Entropy", "Label");
+        println!("  {:<10} {:>10} {:>10} {:>10} {:>10}  {:<5}  {:>7}  Label",
+            "Name", "VirtSize", "VirtAddr", "RawSize", "RawPtr", "Perms", "Entropy");
         println!("  {}", "-".repeat(95));
         for sec in sections {
             let ent = entropy::shannon_entropy(sec.raw_data(data));
@@ -248,6 +377,35 @@ fn print_text(
             println!("  DLL Name: {}", exp.dll_name);
             for func in &exp.functions {
                 println!("    - {}", func);
+            }
+        }
+
+        if let Some(tls_info) = tls {
+            println!("\n=== TLS Callbacks ({}) ===", tls_info.callbacks.len());
+            for (i, va) in tls_info.callbacks.iter().enumerate() {
+                println!("  [{}] 0x{:016X}", i, va);
+            }
+        }
+
+        if let Some(ov) = overlay_info {
+            println!("\n=== Overlay ===");
+            println!("  Offset:   0x{:08X} (byte {})", ov.offset, ov.offset);
+            println!("  Size:     {} bytes", ov.size);
+            println!("  Entropy:  {:.4} ({})", ov.entropy, ov.entropy_label);
+        }
+
+        let interesting = filter_interesting(extracted_strings);
+        println!("\n=== Strings ({} total, {} interesting) ===",
+            extracted_strings.len(), interesting.len());
+        for s in &interesting {
+            println!("  {s}");
+        }
+
+        if !pattern_hits.is_empty() {
+            println!("\n=== Pattern Hits ({}) ===", pattern_hits.len());
+            for h in pattern_hits {
+                println!("  0x{:08X} [{:>2}] {}: {}",
+                    h.offset, h.severity, h.pattern, h.description);
             }
         }
     }
