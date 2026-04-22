@@ -1,8 +1,17 @@
 [package]
-name = "prust"
+name = "sigkill"
 version = "0.1.0"
 edition = "2024"
-description = "PE static analyzer — parses PE files and outputs a triage report"
+description = "Authenticode + BYOVD auditor — verify Windows code signatures and flag supply-chain risk"
+
+[lib]
+name = "sigkill"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# Enable to build the Python extension module (`prust`).
+python = ["dep:pyo3", "dep:pythonize"]
 
 [dependencies]
 # CLI argument parsing
@@ -13,3 +22,10 @@ serde_json = "1"
 # File and import hashing (SHA256, MD5 for imphash/legacy lookup)
 sha2 = "0.10"
 md-5 = "0.10"
+# Authenticode: PKCS#7 SignedData + X.509 + raw DER parsing (RustCrypto)
+cms = "0.2"
+x509-cert = "0.2"
+der = "0.7"
+# Python bindings (optional — enabled by maturin via the `python` feature)
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"], optional = true }
+pythonize = { version = "0.23", optional = true }
