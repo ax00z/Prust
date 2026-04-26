@@ -2,7 +2,11 @@
 name = "sigkill"
 version = "0.1.0"
 edition = "2024"
-description = "Authenticode + BYOVD auditor — verify Windows code signatures and flag supply-chain risk"
+description = "Authenticode + BYOVD auditor - verify Windows code signatures and flag supply-chain risk"
+
+[[bin]]
+name = "prust"
+path = "src/main.rs"
 
 [lib]
 name = "sigkill"
@@ -26,6 +30,6 @@ md-5 = "0.10"
 cms = "0.2"
 x509-cert = "0.2"
 der = "0.7"
-# Python bindings (optional — enabled by maturin via the `python` feature)
+# Python bindings (optional - enabled by maturin via the `python` feature)
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"], optional = true }
 pythonize = { version = "0.23", optional = true }

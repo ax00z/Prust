@@ -103,9 +103,9 @@ impl From<&authenticode::SignatureStatus> for ReportSignature {
     fn from(s: &authenticode::SignatureStatus) -> Self {
         match s {
             authenticode::SignatureStatus::Unsigned => ReportSignature::Unsigned,
-            authenticode::SignatureStatus::Malformed(e) => ReportSignature::Malformed {
-                error: e.clone(),
-            },
+            authenticode::SignatureStatus::Malformed(e) => {
+                ReportSignature::Malformed { error: e.clone() }
+            }
             authenticode::SignatureStatus::Present(p) => ReportSignature::Present {
                 blob_size: p.blob_size,
                 win_cert_revision: format!("0x{:04X}", p.win_cert_revision),
@@ -145,16 +145,42 @@ pub struct Analysis {
 /// persistence mechanisms, shell interpreters, credential-related terms,
 /// injection API names.
 pub const INTERESTING_PATTERNS: &[&str] = &[
-    "http://", "https://", "ftp://",
-    "cmd.exe", "powershell", "wscript", "cscript", "mshta",
-    "HKLM\\", "HKCU\\", "CurrentVersion\\Run",
-    "\\AppData\\", "\\Temp\\", "\\System32\\",
-    ".dll", ".exe", ".bat", ".ps1", ".vbs",
-    "password", "credential", "token", "secret",
-    "CreateRemoteThread", "VirtualAlloc", "WriteProcessMemory",
-    "NtUnmapViewOfSection", "IsDebuggerPresent",
-    "socket", "connect", "recv", "send",
-    "SELECT ", "INSERT ", "DELETE ", "DROP ",
+    "http://",
+    "https://",
+    "ftp://",
+    "cmd.exe",
+    "powershell",
+    "wscript",
+    "cscript",
+    "mshta",
+    "HKLM\\",
+    "HKCU\\",
+    "CurrentVersion\\Run",
+    "\\AppData\\",
+    "\\Temp\\",
+    "\\System32\\",
+    ".dll",
+    ".exe",
+    ".bat",
+    ".ps1",
+    ".vbs",
+    "password",
+    "credential",
+    "token",
+    "secret",
+    "CreateRemoteThread",
+    "VirtualAlloc",
+    "WriteProcessMemory",
+    "NtUnmapViewOfSection",
+    "IsDebuggerPresent",
+    "socket",
+    "connect",
+    "recv",
+    "send",
+    "SELECT ",
+    "INSERT ",
+    "DELETE ",
+    "DROP ",
 ];
 
 /// Keep the report focused; analysts don't want to scroll through 500 strings.
@@ -286,7 +312,12 @@ impl Analysis {
             sha256: self.file_hashes.sha256.clone(),
             imphash: self.file_hashes.imphash.clone(),
             machine: self.coff.machine_name().to_string(),
-            pe_type: if self.opt.is_pe32_plus() { "PE32+" } else { "PE32" }.to_string(),
+            pe_type: if self.opt.is_pe32_plus() {
+                "PE32+"
+            } else {
+                "PE32"
+            }
+            .to_string(),
             subsystem: self.opt.subsystem_name().to_string(),
             entry_point: format!("0x{:08X}", self.opt.address_of_entry_point),
             image_base: format!("0x{:016X}", self.opt.image_base),

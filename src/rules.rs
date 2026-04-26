@@ -77,7 +77,11 @@ pub fn analyze(
     let score: u32 = findings.iter().map(|f| f.severity).sum();
     let verdict = TriageResult::verdict_from_score(score);
 
-    TriageResult { score, verdict, findings }
+    TriageResult {
+        score,
+        verdict,
+        findings,
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -140,16 +144,15 @@ fn check_high_entropy_code(
 
 /// Known packer section names (UPX, ASPack, MPRESS, etc).
 const PACKER_NAMES: &[&str] = &[
-    "UPX0", "UPX1", "UPX2", ".UPX", ".aspack", ".adata", "ASPack",
-    ".nsp0", ".nsp1", ".nsp2", "MEW", ".perplex", ".packed", ".RLPack",
-    "PELOCKnt", ".petite", ".yP", "WinLicen", "_winzip_", ".MPRESS1", ".MPRESS2",
+    "UPX0", "UPX1", "UPX2", ".UPX", ".aspack", ".adata", "ASPack", ".nsp0", ".nsp1", ".nsp2",
+    "MEW", ".perplex", ".packed", ".RLPack", "PELOCKnt", ".petite", ".yP", "WinLicen", "_winzip_",
+    ".MPRESS1", ".MPRESS2",
 ];
 
 /// Standard section names produced by common compilers/linkers.
 const NORMAL_SECTION_NAMES: &[&str] = &[
-    ".text", ".rdata", ".data", ".pdata", ".rsrc", ".reloc", ".bss",
-    ".edata", ".idata", ".tls", ".debug", ".CRT", ".gfids", ".00cfg",
-    ".didat", "fothk", ".xdata", "PAGE", "INIT", ".mrdata",
+    ".text", ".rdata", ".data", ".pdata", ".rsrc", ".reloc", ".bss", ".edata", ".idata", ".tls",
+    ".debug", ".CRT", ".gfids", ".00cfg", ".didat", "fothk", ".xdata", "PAGE", "INIT", ".mrdata",
 ];
 
 fn check_suspicious_section_names(sections: &[SectionHeader], findings: &mut Vec<Finding>) {
@@ -177,7 +180,8 @@ fn check_suspicious_section_names(sections: &[SectionHeader], findings: &mut Vec
                     rule: "UNUSUAL_SECTION_NAME",
                     severity: 3,
                     description: format!(
-                        "Section has non-printable characters in name: {:?}", name
+                        "Section has non-printable characters in name: {:?}",
+                        name
                     ),
                 });
             }
@@ -207,7 +211,8 @@ fn check_few_imports(imports: &[ImportEntry], findings: &mut Vec<Finding>) {
             severity: 5,
             description: format!(
                 "Binary imports only {} function(s) from {} DLL(s) — possible packer stub",
-                total_funcs, imports.len()
+                total_funcs,
+                imports.len()
             ),
         });
     }
@@ -215,7 +220,8 @@ fn check_few_imports(imports: &[ImportEntry], findings: &mut Vec<Finding>) {
 
 /// Suspicious API combinations indicating injection, evasion, or credential theft.
 fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Finding>) {
-    let all_funcs: Vec<String> = imports.iter()
+    let all_funcs: Vec<String> = imports
+        .iter()
         .flat_map(|i| i.functions.iter())
         .map(|f| f.to_lowercase())
         .collect();
@@ -228,7 +234,8 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
             rule: "PROCESS_INJECTION_COMBO",
             severity: 9,
             description: "Imports VirtualAlloc + WriteProcessMemory + CreateRemoteThread \
-                — classic process injection pattern".to_string(),
+                — classic process injection pattern"
+                .to_string(),
         });
     }
 
@@ -238,7 +245,8 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
             rule: "NTAPI_INJECTION_COMBO",
             severity: 9,
             description: "Imports WriteProcessMemory + NtCreateThreadEx/RtlCreateUserThread \
-                — native API injection".to_string(),
+                — native API injection"
+                .to_string(),
         });
     }
 
@@ -248,7 +256,8 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
             rule: "SHELLCODE_LOADING",
             severity: 5,
             description: "Imports VirtualAlloc + VirtualProtect \
-                — may allocate and change memory permissions".to_string(),
+                — may allocate and change memory permissions"
+                .to_string(),
         });
     }
 
@@ -274,7 +283,8 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
             rule: "ANTI_DEBUG",
             severity: 4,
             description: "Imports anti-debugging APIs (IsDebuggerPresent, \
-                CheckRemoteDebuggerPresent, or NtQueryInformationProcess)".to_string(),
+                CheckRemoteDebuggerPresent, or NtQueryInformationProcess)"
+                .to_string(),
         });
     }
 
@@ -284,7 +294,8 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
             rule: "DYNAMIC_API_RESOLUTION",
             severity: 2,
             description: "Imports GetProcAddress + LoadLibrary \
-                — may resolve APIs dynamically to hide behavior".to_string(),
+                — may resolve APIs dynamically to hide behavior"
+                .to_string(),
         });
     }
 }
@@ -464,7 +475,10 @@ mod tests {
 
     #[test]
     fn getprocaddress_plus_loadlibraryw_triggers_dynamic_resolution() {
-        let imports = vec![make_import("KERNEL32.dll", &["GetProcAddress", "LoadLibraryW"])];
+        let imports = vec![make_import(
+            "KERNEL32.dll",
+            &["GetProcAddress", "LoadLibraryW"],
+        )];
         let mut findings = Vec::new();
         check_suspicious_import_combos(&imports, &mut findings);
         assert!(findings.iter().any(|f| f.rule == "DYNAMIC_API_RESOLUTION"));
@@ -472,9 +486,10 @@ mod tests {
 
     #[test]
     fn injection_combo_triggers() {
-        let imports = vec![make_import("KERNEL32.dll", &[
-            "VirtualAlloc", "WriteProcessMemory", "CreateRemoteThread",
-        ])];
+        let imports = vec![make_import(
+            "KERNEL32.dll",
+            &["VirtualAlloc", "WriteProcessMemory", "CreateRemoteThread"],
+        )];
         let mut findings = Vec::new();
         check_suspicious_import_combos(&imports, &mut findings);
         assert!(findings.iter().any(|f| f.rule == "PROCESS_INJECTION_COMBO"));
@@ -482,9 +497,10 @@ mod tests {
 
     #[test]
     fn injection_combo_case_insensitive() {
-        let imports = vec![make_import("KERNEL32.dll", &[
-            "virtualalloc", "WRITEPROCESSMEMORY", "createRemoteThread",
-        ])];
+        let imports = vec![make_import(
+            "KERNEL32.dll",
+            &["virtualalloc", "WRITEPROCESSMEMORY", "createRemoteThread"],
+        )];
         let mut findings = Vec::new();
         check_suspicious_import_combos(&imports, &mut findings);
         assert!(findings.iter().any(|f| f.rule == "PROCESS_INJECTION_COMBO"));
@@ -530,13 +546,23 @@ mod tests {
     #[test]
     fn no_aslr_detected() {
         let opt = OptionalHeader {
-            magic: 0x20B, major_linker_version: 0, minor_linker_version: 0,
-            size_of_code: 0, address_of_entry_point: 0, image_base: 0,
-            section_alignment: 0, file_alignment: 0, major_os_version: 0,
-            minor_os_version: 0, size_of_image: 0, size_of_headers: 0,
-            checksum: 0, subsystem: 0,
+            magic: 0x20B,
+            major_linker_version: 0,
+            minor_linker_version: 0,
+            size_of_code: 0,
+            address_of_entry_point: 0,
+            image_base: 0,
+            section_alignment: 0,
+            file_alignment: 0,
+            major_os_version: 0,
+            minor_os_version: 0,
+            size_of_image: 0,
+            size_of_headers: 0,
+            checksum: 0,
+            subsystem: 0,
             dll_characteristics: 0x0100, // DEP yes, ASLR no
-            number_of_rva_and_sizes: 0, data_directories: vec![],
+            number_of_rva_and_sizes: 0,
+            data_directories: vec![],
         };
         let mut findings = Vec::new();
         check_no_aslr(&opt, &mut findings);
@@ -547,13 +573,23 @@ mod tests {
     #[test]
     fn aslr_present_not_flagged() {
         let opt = OptionalHeader {
-            magic: 0x20B, major_linker_version: 0, minor_linker_version: 0,
-            size_of_code: 0, address_of_entry_point: 0, image_base: 0,
-            section_alignment: 0, file_alignment: 0, major_os_version: 0,
-            minor_os_version: 0, size_of_image: 0, size_of_headers: 0,
-            checksum: 0, subsystem: 0,
+            magic: 0x20B,
+            major_linker_version: 0,
+            minor_linker_version: 0,
+            size_of_code: 0,
+            address_of_entry_point: 0,
+            image_base: 0,
+            section_alignment: 0,
+            file_alignment: 0,
+            major_os_version: 0,
+            minor_os_version: 0,
+            size_of_image: 0,
+            size_of_headers: 0,
+            checksum: 0,
+            subsystem: 0,
             dll_characteristics: 0x0140, // ASLR + DEP
-            number_of_rva_and_sizes: 0, data_directories: vec![],
+            number_of_rva_and_sizes: 0,
+            data_directories: vec![],
         };
         let mut findings = Vec::new();
         check_no_aslr(&opt, &mut findings);

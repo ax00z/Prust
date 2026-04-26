@@ -142,7 +142,9 @@ impl ParseError {
     fn truncated(offset: usize, need: usize, have: usize, context: &str) -> Self {
         ParseError {
             kind: ParseErrorKind::TruncatedHeader,
-            detail: format!("{context}: need {need} bytes at offset 0x{offset:X}, file is {have} bytes"),
+            detail: format!(
+                "{context}: need {need} bytes at offset 0x{offset:X}, file is {have} bytes"
+            ),
         }
     }
 
@@ -176,28 +178,27 @@ impl std::error::Error for ParseError {}
 /// Read a u16 from `data` at `offset` (little-endian).
 /// Returns `Err` if the slice is too short — never panics.
 fn read_u16_at(data: &[u8], offset: usize, field: &str) -> Result<u16, ParseError> {
-    let bytes = data.get(offset..offset + 2).ok_or_else(|| {
-        ParseError::truncated(offset, 2, data.len(), field)
-    })?;
+    let bytes = data
+        .get(offset..offset + 2)
+        .ok_or_else(|| ParseError::truncated(offset, 2, data.len(), field))?;
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 /// Read a u32 from `data` at `offset` (little-endian).
 fn read_u32_at(data: &[u8], offset: usize, field: &str) -> Result<u32, ParseError> {
-    let bytes = data.get(offset..offset + 4).ok_or_else(|| {
-        ParseError::truncated(offset, 4, data.len(), field)
-    })?;
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or_else(|| ParseError::truncated(offset, 4, data.len(), field))?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 /// Read a u64 from `data` at `offset` (little-endian).
 fn read_u64_at(data: &[u8], offset: usize, field: &str) -> Result<u64, ParseError> {
-    let bytes = data.get(offset..offset + 8).ok_or_else(|| {
-        ParseError::truncated(offset, 8, data.len(), field)
-    })?;
+    let bytes = data
+        .get(offset..offset + 8)
+        .ok_or_else(|| ParseError::truncated(offset, 8, data.len(), field))?;
     Ok(u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]))
 }
 
@@ -241,7 +242,11 @@ pub struct DosHeader {
 impl DosHeader {
     pub fn parse(data: &[u8]) -> Result<Self, ParseError> {
         if data.len() < DOS_HEADER_SIZE {
-            return Err(ParseError::too_small(DOS_HEADER_SIZE, data.len(), "DOS header"));
+            return Err(ParseError::too_small(
+                DOS_HEADER_SIZE,
+                data.len(),
+                "DOS header",
+            ));
         }
 
         let e_magic = read_u16_at(data, 0, "e_magic")?;
@@ -285,7 +290,11 @@ impl CoffHeader {
     pub fn parse(data: &[u8], pe_offset: usize) -> Result<Self, ParseError> {
         let required = pe_offset + PE_SIGNATURE_SIZE + COFF_HEADER_SIZE;
         if data.len() < required {
-            return Err(ParseError::too_small(required, data.len(), "PE signature + COFF header"));
+            return Err(ParseError::too_small(
+                required,
+                data.len(),
+                "PE signature + COFF header",
+            ));
         }
 
         let sig = read_u32_at(data, pe_offset, "PE signature")?;
@@ -333,11 +342,21 @@ impl CoffHeader {
     pub fn characteristics_list(&self) -> Vec<&'static str> {
         let mut flags = Vec::new();
         let c = self.characteristics;
-        if c & IMAGE_FILE_EXECUTABLE_IMAGE != 0 { flags.push("EXECUTABLE_IMAGE"); }
-        if c & IMAGE_FILE_LARGE_ADDRESS_AWARE != 0 { flags.push("LARGE_ADDRESS_AWARE"); }
-        if c & IMAGE_FILE_32BIT_MACHINE != 0 { flags.push("32BIT_MACHINE"); }
-        if c & IMAGE_FILE_DEBUG_STRIPPED != 0 { flags.push("DEBUG_STRIPPED"); }
-        if c & IMAGE_FILE_DLL != 0 { flags.push("DLL"); }
+        if c & IMAGE_FILE_EXECUTABLE_IMAGE != 0 {
+            flags.push("EXECUTABLE_IMAGE");
+        }
+        if c & IMAGE_FILE_LARGE_ADDRESS_AWARE != 0 {
+            flags.push("LARGE_ADDRESS_AWARE");
+        }
+        if c & IMAGE_FILE_32BIT_MACHINE != 0 {
+            flags.push("32BIT_MACHINE");
+        }
+        if c & IMAGE_FILE_DEBUG_STRIPPED != 0 {
+            flags.push("DEBUG_STRIPPED");
+        }
+        if c & IMAGE_FILE_DLL != 0 {
+            flags.push("DLL");
+        }
         flags
     }
 }
@@ -379,14 +398,23 @@ impl OptionalHeader {
     pub fn parse(data: &[u8], offset: usize) -> Result<Self, ParseError> {
         // We need at least 2 bytes to read the magic and determine the format.
         if data.len() < offset + 2 {
-            return Err(ParseError::too_small(offset + 2, data.len(), "optional header magic"));
+            return Err(ParseError::too_small(
+                offset + 2,
+                data.len(),
+                "optional header magic",
+            ));
         }
 
         let magic = read_u16_at(data, offset, "OptionalHeader.Magic")?;
         let is_pe32_plus = match magic {
             PE32_MAGIC => false,
             PE32PLUS_MAGIC => true,
-            _ => return Err(ParseError::bad_magic("PE32 (0x10B) or PE32+ (0x20B)", magic)),
+            _ => {
+                return Err(ParseError::bad_magic(
+                    "PE32 (0x10B) or PE32+ (0x20B)",
+                    magic,
+                ));
+            }
         };
 
         // Minimum size for the fixed portion of the optional header
@@ -394,7 +422,9 @@ impl OptionalHeader {
         let fixed_size = if is_pe32_plus { 112 } else { 96 };
         if data.len() < offset + fixed_size {
             return Err(ParseError::too_small(
-                offset + fixed_size, data.len(), "optional header fixed fields",
+                offset + fixed_size,
+                data.len(),
+                "optional header fixed fields",
             ));
         }
 
@@ -497,17 +527,39 @@ impl OptionalHeader {
     pub fn dll_characteristics_list(&self) -> Vec<&'static str> {
         let mut flags = Vec::new();
         let c = self.dll_characteristics;
-        if c & IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA != 0 { flags.push("HIGH_ENTROPY_VA"); }
-        if c & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE != 0 { flags.push("DYNAMIC_BASE (ASLR)"); }
-        if c & IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY != 0 { flags.push("FORCE_INTEGRITY"); }
-        if c & IMAGE_DLLCHARACTERISTICS_NX_COMPAT != 0 { flags.push("NX_COMPAT (DEP)"); }
-        if c & IMAGE_DLLCHARACTERISTICS_NO_ISOLATION != 0 { flags.push("NO_ISOLATION"); }
-        if c & IMAGE_DLLCHARACTERISTICS_NO_SEH != 0 { flags.push("NO_SEH"); }
-        if c & IMAGE_DLLCHARACTERISTICS_NO_BIND != 0 { flags.push("NO_BIND"); }
-        if c & IMAGE_DLLCHARACTERISTICS_APPCONTAINER != 0 { flags.push("APPCONTAINER"); }
-        if c & IMAGE_DLLCHARACTERISTICS_WDM_DRIVER != 0 { flags.push("WDM_DRIVER"); }
-        if c & IMAGE_DLLCHARACTERISTICS_GUARD_CF != 0 { flags.push("GUARD_CF"); }
-        if c & IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE != 0 { flags.push("TERMINAL_SERVER_AWARE"); }
+        if c & IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA != 0 {
+            flags.push("HIGH_ENTROPY_VA");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE != 0 {
+            flags.push("DYNAMIC_BASE (ASLR)");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY != 0 {
+            flags.push("FORCE_INTEGRITY");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_NX_COMPAT != 0 {
+            flags.push("NX_COMPAT (DEP)");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_NO_ISOLATION != 0 {
+            flags.push("NO_ISOLATION");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_NO_SEH != 0 {
+            flags.push("NO_SEH");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_NO_BIND != 0 {
+            flags.push("NO_BIND");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_APPCONTAINER != 0 {
+            flags.push("APPCONTAINER");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_WDM_DRIVER != 0 {
+            flags.push("WDM_DRIVER");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_GUARD_CF != 0 {
+            flags.push("GUARD_CF");
+        }
+        if c & IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE != 0 {
+            flags.push("TERMINAL_SERVER_AWARE");
+        }
         flags
     }
 }
@@ -533,7 +585,10 @@ impl SectionHeader {
         let required = offset + count * SECTION_HEADER_SIZE;
         if data.len() < required {
             return Err(ParseError::truncated(
-                offset, count * SECTION_HEADER_SIZE, data.len(), "section table",
+                offset,
+                count * SECTION_HEADER_SIZE,
+                data.len(),
+                "section table",
             ));
         }
 
@@ -676,7 +731,10 @@ pub fn parse_imports(
         };
 
         let functions = parse_thunk_array(data, thunk_rva, sections, is_pe32_plus);
-        imports.push(ImportEntry { dll_name, functions });
+        imports.push(ImportEntry {
+            dll_name,
+            functions,
+        });
         desc_offset += 20;
     }
 
@@ -709,12 +767,15 @@ fn parse_thunk_array(
         }
 
         let (value, is_ordinal) = if is_pe32_plus {
-            let v = data.get(offset..offset + 8)
-                .map_or(0u64, |b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]));
+            let v = data.get(offset..offset + 8).map_or(0u64, |b| {
+                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+            });
             (v, v & 0x8000_0000_0000_0000 != 0)
         } else {
-            let v = u64::from(data.get(offset..offset + 4)
-                .map_or(0u32, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+            let v = u64::from(
+                data.get(offset..offset + 4)
+                    .map_or(0u32, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            );
             (v, v & 0x8000_0000 != 0)
         };
 
@@ -786,7 +847,10 @@ pub fn parse_exports(
         }
     }
 
-    Some(ExportInfo { dll_name, functions })
+    Some(ExportInfo {
+        dll_name,
+        functions,
+    })
 }
 
 // ──────────────────────────────────────────────
@@ -923,12 +987,15 @@ mod tests {
     fn reject_excessive_section_count() {
         // Build a minimal valid PE up to the COFF header with 0xFFFF sections
         let mut data = [0u8; 256];
-        data[0] = 0x4D; data[1] = 0x5A; // MZ
+        data[0] = 0x4D;
+        data[1] = 0x5A; // MZ
         data[0x3C] = 0x80; // e_lfanew
         // PE signature at 0x80
-        data[0x80] = 0x50; data[0x81] = 0x45; // "PE\0\0"
+        data[0x80] = 0x50;
+        data[0x81] = 0x45; // "PE\0\0"
         // NumberOfSections at 0x86 = 0xFFFF
-        data[0x86] = 0xFF; data[0x87] = 0xFF;
+        data[0x86] = 0xFF;
+        data[0x87] = 0xFF;
         let result = CoffHeader::parse(&data, 0x80);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind, ParseErrorKind::MalformedField);
@@ -950,16 +1017,14 @@ mod tests {
 
     #[test]
     fn rva_to_offset_finds_correct_section() {
-        let sections = vec![
-            SectionHeader {
-                name: ".text".into(),
-                virtual_size: 0x1000,
-                virtual_address: 0x1000,
-                size_of_raw_data: 0x1000,
-                pointer_to_raw_data: 0x400,
-                characteristics: 0,
-            },
-        ];
+        let sections = vec![SectionHeader {
+            name: ".text".into(),
+            virtual_size: 0x1000,
+            virtual_address: 0x1000,
+            size_of_raw_data: 0x1000,
+            pointer_to_raw_data: 0x400,
+            characteristics: 0,
+        }];
         // RVA 0x1010 should map to file offset 0x410
         assert_eq!(rva_to_offset(0x1010, &sections), Some(0x410));
         // RVA 0x3000 is outside all sections
@@ -972,7 +1037,7 @@ mod tests {
             name: ".text".into(),
             virtual_size: 0x1000,
             virtual_address: 0x1000,
-            size_of_raw_data: 0xFFFF,  // larger than file
+            size_of_raw_data: 0xFFFF, // larger than file
             pointer_to_raw_data: 5,
             characteristics: 0,
         };

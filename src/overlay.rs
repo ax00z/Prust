@@ -86,10 +86,7 @@ mod tests {
     #[test]
     fn uses_last_section_end_not_first() {
         let data = vec![0u8; 2048];
-        let sections = vec![
-            make_section(0, 512),
-            make_section(512, 1024),
-        ];
+        let sections = vec![make_section(0, 512), make_section(512, 1024)];
         let info = detect_overlay(&data, &sections).unwrap();
         assert_eq!(info.offset, 1536);
         assert_eq!(info.size, 512);

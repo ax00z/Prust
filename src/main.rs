@@ -111,12 +111,19 @@ fn print_text(path: &str, a: &api::Analysis, triage_only: bool) {
         authenticode::SignatureStatus::Present(p) => {
             println!("  Status:  PRESENT");
             println!("  WIN_CERT revision: 0x{:04X}", p.win_cert_revision);
-            println!("  WIN_CERT type:     0x{:04X} (PKCS_7_SIGNED_DATA)", p.win_cert_type);
+            println!(
+                "  WIN_CERT type:     0x{:04X} (PKCS_7_SIGNED_DATA)",
+                p.win_cert_type
+            );
             println!("  Blob size:         {} bytes", p.blob_size);
             println!(
                 "  Content OID:       {} {}",
                 p.content_type_oid,
-                if p.is_signed_data { "(signedData)" } else { "(unexpected)" }
+                if p.is_signed_data {
+                    "(signedData)"
+                } else {
+                    "(unexpected)"
+                }
             );
         }
     }
@@ -149,13 +156,20 @@ fn print_text(path: &str, a: &api::Analysis, triage_only: bool) {
         println!(
             "  Magic:              0x{:04X} ({})",
             a.opt.magic,
-            if a.opt.is_pe32_plus() { "PE32+ (64-bit)" } else { "PE32 (32-bit)" }
+            if a.opt.is_pe32_plus() {
+                "PE32+ (64-bit)"
+            } else {
+                "PE32 (32-bit)"
+            }
         );
         println!(
             "  Linker:             {}.{}",
             a.opt.major_linker_version, a.opt.minor_linker_version
         );
-        println!("  EntryPoint:         0x{:08X}", a.opt.address_of_entry_point);
+        println!(
+            "  EntryPoint:         0x{:08X}",
+            a.opt.address_of_entry_point
+        );
         println!("  ImageBase:          0x{:016X}", a.opt.image_base);
         println!("  SectionAlignment:   0x{:08X}", a.opt.section_alignment);
         println!("  FileAlignment:      0x{:08X}", a.opt.file_alignment);

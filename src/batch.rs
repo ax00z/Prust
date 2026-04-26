@@ -140,14 +140,26 @@ fn run_triage(data: &[u8]) -> BatchResult {
         Err(e) => return BatchResult::ParseError(e.to_string()),
     };
 
-    let imports = opt.data_directories.get(pe::DIR_IMPORT)
+    let imports = opt
+        .data_directories
+        .get(pe::DIR_IMPORT)
         .filter(|d| d.virtual_address != 0)
         .map(|d| pe::parse_imports(data, d.virtual_address, &sections, opt.is_pe32_plus()))
         .unwrap_or_default();
 
-    let tls = opt.data_directories.get(pe::DIR_TLS)
+    let tls = opt
+        .data_directories
+        .get(pe::DIR_TLS)
         .filter(|d| d.virtual_address != 0)
-        .and_then(|d| pe::parse_tls(data, d.virtual_address, &sections, opt.image_base, opt.is_pe32_plus()));
+        .and_then(|d| {
+            pe::parse_tls(
+                data,
+                d.virtual_address,
+                &sections,
+                opt.image_base,
+                opt.is_pe32_plus(),
+            )
+        });
 
     let overlay_info = crate::overlay::detect_overlay(data, &sections);
 
@@ -155,11 +167,22 @@ fn run_triage(data: &[u8]) -> BatchResult {
     let raw_hits = patterns::scan_all(&data[scan_start..], &patterns::builtin_patterns());
     let pattern_hits: Vec<patterns::PatternHit> = raw_hits
         .into_iter()
-        .map(|mut h| { h.offset += scan_start; h })
+        .map(|mut h| {
+            h.offset += scan_start;
+            h
+        })
         .collect();
 
-    let triage = rules::analyze(&coff, &opt, &sections, &imports, data,
-        tls.as_ref(), overlay_info.as_ref(), &pattern_hits);
+    let triage = rules::analyze(
+        &coff,
+        &opt,
+        &sections,
+        &imports,
+        data,
+        tls.as_ref(),
+        overlay_info.as_ref(),
+        &pattern_hits,
+    );
     BatchResult::Ok(triage)
 }
 
@@ -177,7 +200,8 @@ pub fn print_summary(entries: &mut [BatchEntry]) {
         score_b.cmp(&score_a)
     });
 
-    let pe_count = entries.iter()
+    let pe_count = entries
+        .iter()
         .filter(|e| matches!(e.result, BatchResult::Ok(_)))
         .count();
     let error_count = entries.len() - pe_count;
@@ -192,7 +216,10 @@ pub fn print_summary(entries: &mut [BatchEntry]) {
         return;
     }
 
-    println!("  {:>5}  {:<12}  {:<40}  Path", "Score", "Verdict", "Top Finding");
+    println!(
+        "  {:>5}  {:<12}  {:<40}  Path",
+        "Score", "Verdict", "Top Finding"
+    );
     println!("  {}", "-".repeat(100));
 
     for entry in entries.iter() {
@@ -205,34 +232,46 @@ pub fn print_summary(entries: &mut [BatchEntry]) {
 
         match &entry.result {
             BatchResult::Ok(t) => {
-                let top = t.findings.first()
-                    .map_or("—".to_string(), |f| {
-                        if f.rule.len() > 38 {
-                            f.rule[..38].to_string()
-                        } else {
-                            f.rule.to_string()
-                        }
-                    });
-                println!("  {:>5}  {:<12}  {:<40}  {}",
-                    t.score, t.verdict, top, path_display);
+                let top = t.findings.first().map_or("—".to_string(), |f| {
+                    if f.rule.len() > 38 {
+                        f.rule[..38].to_string()
+                    } else {
+                        f.rule.to_string()
+                    }
+                });
+                println!(
+                    "  {:>5}  {:<12}  {:<40}  {}",
+                    t.score, t.verdict, top, path_display
+                );
             }
             BatchResult::NotPe => {
-                println!("  {:>5}  {:<12}  {:<40}  {}",
-                    "-", "NOT PE", "", path_display);
+                println!(
+                    "  {:>5}  {:<12}  {:<40}  {}",
+                    "-", "NOT PE", "", path_display
+                );
             }
             BatchResult::TooLarge(size) => {
-                println!("  {:>5}  {:<12}  {:<40}  {}",
-                    "-", "TOO LARGE", format!("{size} bytes"), path_display);
+                println!(
+                    "  {:>5}  {:<12}  {:<40}  {}",
+                    "-",
+                    "TOO LARGE",
+                    format!("{size} bytes"),
+                    path_display
+                );
             }
             BatchResult::IoError(msg) => {
                 let truncated = if msg.len() > 38 { &msg[..38] } else { msg };
-                println!("  {:>5}  {:<12}  {:<40}  {}",
-                    "-", "IO ERROR", truncated, path_display);
+                println!(
+                    "  {:>5}  {:<12}  {:<40}  {}",
+                    "-", "IO ERROR", truncated, path_display
+                );
             }
             BatchResult::ParseError(msg) => {
                 let truncated = if msg.len() > 38 { &msg[..38] } else { msg };
-                println!("  {:>5}  {:<12}  {:<40}  {}",
-                    "-", "PARSE ERROR", truncated, path_display);
+                println!(
+                    "  {:>5}  {:<12}  {:<40}  {}",
+                    "-", "PARSE ERROR", truncated, path_display
+                );
             }
         }
     }

@@ -182,8 +182,17 @@ mod tests {
 
     /// Build an OptionalHeader stub with a specific security directory.
     fn opt_with_security(va: u32, size: u32) -> OptionalHeader {
-        let mut dirs = vec![DataDirectory { virtual_address: 0, size: 0 }; 16];
-        dirs[DIR_SECURITY] = DataDirectory { virtual_address: va, size };
+        let mut dirs = vec![
+            DataDirectory {
+                virtual_address: 0,
+                size: 0
+            };
+            16
+        ];
+        dirs[DIR_SECURITY] = DataDirectory {
+            virtual_address: va,
+            size,
+        };
         OptionalHeader {
             magic: 0x20B,
             major_linker_version: 0,
@@ -219,7 +228,10 @@ mod tests {
     fn malformed_when_directory_past_eof() {
         let opt = opt_with_security(1000, 100);
         let data = vec![0u8; 500];
-        assert!(matches!(analyze(&data, &opt), SignatureStatus::Malformed(_)));
+        assert!(matches!(
+            analyze(&data, &opt),
+            SignatureStatus::Malformed(_)
+        ));
     }
 
     #[test]
@@ -227,7 +239,10 @@ mod tests {
         // Directory claims 4 bytes, less than WIN_CERTIFICATE header (8).
         let opt = opt_with_security(TEST_VA, 4);
         let data = vec![0u8; 32];
-        assert!(matches!(analyze(&data, &opt), SignatureStatus::Malformed(_)));
+        assert!(matches!(
+            analyze(&data, &opt),
+            SignatureStatus::Malformed(_)
+        ));
     }
 
     #[test]

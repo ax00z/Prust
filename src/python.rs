@@ -37,8 +37,7 @@ fn parse_imports_best_effort(data: &[u8]) -> Vec<pe::ImportEntry> {
         return vec![];
     };
     let sec_offset = pe::section_table_offset(pe_offset, coff.size_of_optional_header);
-    let Ok(sections) =
-        pe::SectionHeader::parse_all(data, sec_offset, coff.number_of_sections)
+    let Ok(sections) = pe::SectionHeader::parse_all(data, sec_offset, coff.number_of_sections)
     else {
         return vec![];
     };
@@ -123,7 +122,10 @@ fn py_signature(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
         authenticode::SignatureStatus::Present(p) => {
             dict.set_item("status", "present")?;
             dict.set_item("blob_size", p.blob_size)?;
-            dict.set_item("win_cert_revision", format!("0x{:04X}", p.win_cert_revision))?;
+            dict.set_item(
+                "win_cert_revision",
+                format!("0x{:04X}", p.win_cert_revision),
+            )?;
             dict.set_item("win_cert_type", format!("0x{:04X}", p.win_cert_type))?;
             dict.set_item("content_type_oid", p.content_type_oid)?;
             dict.set_item("is_signed_data", p.is_signed_data)?;
