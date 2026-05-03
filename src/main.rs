@@ -1,13 +1,12 @@
-use sigkill::{api, authenticode, batch, entropy, pe, rules};
+use sigkill::{api, authenticode, batch, entropy, loldrivers, pe, rules};
 
 use clap::Parser;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Maximum file size imma load into memory (256 MB).
-/// PE files larger than this are almost certainly not real executables,
-/// or are too large for in-memory analysis to be practical.
+mod fetch;
+
 const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
 #[derive(Parser)]
@@ -17,16 +16,28 @@ const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
     about = "PE static analyzer; parse and triage PE files"
 )]
 struct Cli {
-    /// Path to a PE file, or a directory to recursively scan
-    file: String,
+    /// PE file or directory. Required unless --update.
+    file: Option<String>,
 
-    /// Output results as JSON
+    /// Output as JSON.
     #[arg(long)]
     json: bool,
 
-    /// Only show the triage result (skip full header dump)
+    /// Skip the full header dump.
     #[arg(long)]
     triage_only: bool,
+
+    /// Use the LOLDrivers corpus at PATH instead of the cached one.
+    #[arg(long, value_name = "PATH")]
+    loldrivers: Option<PathBuf>,
+
+    /// Skip the LOLDrivers lookup.
+    #[arg(long, conflicts_with = "loldrivers")]
+    no_loldrivers: bool,
+
+    /// Refresh the cached LOLDrivers corpus and exit.
+    #[arg(long)]
+    update: bool,
 }
 
 fn main() -> ExitCode {
@@ -41,25 +52,53 @@ fn main() -> ExitCode {
     }
 }
 
-/// All real logic lives here so errors propagate with `?` instead of `process::exit`.
 fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let path = &cli.file;
-
-    // Directory mode: recursively scan and print a summary table.
-    // We check this BEFORE the size check because directories have no
-    // meaningful `len()` and we want different code paths entirely.
-    let meta_check = fs::metadata(path).map_err(|e| format!("cannot stat {path}: {e}"))?;
-    if meta_check.is_dir() {
-        let mut entries = batch::scan_directory(Path::new(path));
-        batch::print_summary(&mut entries);
+    if cli.update {
+        let outcome = fetch::fetch_to_cache()?;
+        eprintln!(
+            "Updated LOLDrivers cache: {} ({} bytes)",
+            outcome.path.display(),
+            outcome.bytes
+        );
         return Ok(());
     }
 
-    // Check file size before reading into memory.
+    let path = cli
+        .file
+        .as_deref()
+        .ok_or("missing FILE argument (or pass --update to refresh the LOLDrivers cache)")?;
+
+    // Resolution: --no-loldrivers > --loldrivers <path> > cached > none.
+    let lol_db = if cli.no_loldrivers {
+        None
+    } else if let Some(p) = &cli.loldrivers {
+        Some(loldrivers::LolDriversDb::load_from_path(p)?)
+    } else if let Some(p) = fetch::cached_path() {
+        let age = fetch::cache_age().map(fetch::human_age).unwrap_or_default();
+        eprintln!("[*] Using cached LOLDrivers corpus ({age} old). Refresh with `prust --update`.");
+        Some(loldrivers::LolDriversDb::load_from_path(&p)?)
+    } else {
+        None
+    };
+
+    // Directory mode runs before the size check (directories have no len()).
+    let meta_check = fs::metadata(path).map_err(|e| format!("cannot stat {path}: {e}"))?;
+    if meta_check.is_dir() {
+        let mut entries = batch::scan_directory(Path::new(path), lol_db.as_ref());
+        if cli.json {
+            batch::sort_by_risk(&mut entries);
+            let report = batch::to_report(&entries);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            batch::print_summary(&mut entries);
+        }
+        return Ok(());
+    }
+
     let metadata = meta_check;
     if metadata.len() > MAX_FILE_SIZE {
         return Err(format!(
-            "{path} is {} bytes — exceeds {} byte limit",
+            "{path} is {} bytes; exceeds {} byte limit",
             metadata.len(),
             MAX_FILE_SIZE
         )
@@ -67,10 +106,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let data = fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-
-    // Full pipeline lives in the library so both the CLI and the Python
-    // bindings share one implementation.
-    let analysis = api::analyze_bytes(data)?;
+    let analysis = api::analyze_bytes(data, lol_db.as_ref())?;
 
     if cli.json {
         print_json(path, &analysis)?;
@@ -91,11 +127,15 @@ fn print_text(path: &str, a: &api::Analysis, triage_only: bool) {
     println!("[*] Loaded {} ({} bytes)\n", path, a.data.len());
 
     println!("=== Hashes ===");
-    println!("  MD5:     {}", a.file_hashes.md5);
-    println!("  SHA256:  {}", a.file_hashes.sha256);
+    println!("  MD5:          {}", a.file_hashes.md5);
+    println!("  SHA256:       {}", a.file_hashes.sha256);
     match &a.file_hashes.imphash {
-        Some(h) => println!("  Imphash: {h}"),
-        None => println!("  Imphash: (no imports)"),
+        Some(h) => println!("  Imphash:      {h}"),
+        None => println!("  Imphash:      (no imports)"),
+    }
+    match &a.file_hashes.authentihash {
+        Some(h) => println!("  Authentihash: {h}"),
+        None => println!("  Authentihash: (could not compute)"),
     }
     println!();
 
@@ -128,6 +168,22 @@ fn print_text(path: &str, a: &api::Analysis, triage_only: bool) {
         }
     }
     println!();
+
+    if let Some(m) = &a.loldrivers_match {
+        println!("=== LOLDrivers Match ===");
+        println!("  Matched by: {}", m.kind.as_str());
+        println!("  Driver ID:  {}", m.entry.id);
+        println!("  Filename:   {}", m.entry.filename);
+        println!("  Category:   {}", m.entry.category);
+        println!(
+            "  MITRE:      {}",
+            m.entry.mitre_id.as_deref().unwrap_or("(none)")
+        );
+        if !m.entry.tags.is_empty() {
+            println!("  Tags:       {}", m.entry.tags.join(", "));
+        }
+        println!();
+    }
 
     if !triage_only {
         println!("=== DOS Header ===");

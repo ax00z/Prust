@@ -1,15 +1,6 @@
-// pe.rs — Core PE parsing logic.
-//
-// Parses raw bytes according to the PE/COFF specification (Microsoft PE format).
-// All multi-byte integers are little-endian.
-//
-// Reference: https://learn.microsoft.com/en-us/windows/win32/debug/pe-format
+// PE/COFF parsing. All multi-byte integers are little-endian.
 
 use std::fmt;
-
-// ──────────────────────────────────────────────
-// PE spec constants
-// ──────────────────────────────────────────────
 
 const DOS_MAGIC: u16 = 0x5A4D; // "MZ"
 const PE_SIGNATURE: u32 = 0x0000_4550; // "PE\0\0"
@@ -23,21 +14,10 @@ const SECTION_HEADER_SIZE: usize = 40;
 const DATA_DIRECTORY_ENTRY_SIZE: usize = 8;
 const E_LFANEW_OFFSET: usize = 0x3C;
 
-/// Upper bound on section count to reject obviously malformed headers.
-/// The PE spec doesn't define a hard maximum, but real-world binaries rarely
-/// exceed ~30 sections. We cap at 96 to be generous while still rejecting
-/// garbage values like 0xFFFF that would cause huge allocations.
+// Bounds against malformed-header DoS.
 const MAX_SECTIONS: u16 = 96;
-
-/// Safety limit: stop reading import descriptors after this many entries.
-/// Prevents infinite loops on malformed import directories.
 const MAX_IMPORT_DLLS: usize = 4096;
-
-/// Safety limit per thunk array.
 const MAX_THUNK_ENTRIES: usize = 65536;
-
-/// Maximum length for a single ASCII string read from the file.
-/// Prevents reading the entire remainder of a file on a missing null terminator.
 const MAX_ASCII_STRING_LEN: usize = 1024;
 
 // Section characteristic flags (IMAGE_SCN_*)
@@ -70,10 +50,6 @@ const IMAGE_FILE_MACHINE_I386: u16 = 0x14C;
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 const IMAGE_FILE_MACHINE_ARM: u16 = 0x1C0;
 const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
-
-// ──────────────────────────────────────────────
-// Data directory indices
-// ──────────────────────────────────────────────
 
 pub const DIR_EXPORT: usize = 0;
 pub const DIR_IMPORT: usize = 1;
@@ -110,12 +86,6 @@ pub fn dir_name(index: usize) -> &'static str {
     }
 }
 
-// ──────────────────────────────────────────────
-// Error type
-// ──────────────────────────────────────────────
-
-/// Parse error with dynamic context — carries the specific offset or value
-/// that caused the failure, not just a static description.
 #[derive(Debug, Clone)]
 pub struct ParseError {
     pub kind: ParseErrorKind,
@@ -171,12 +141,6 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-// ──────────────────────────────────────────────
-// Byte-reading helpers
-// ──────────────────────────────────────────────
-
-/// Read a u16 from `data` at `offset` (little-endian).
-/// Returns `Err` if the slice is too short — never panics.
 fn read_u16_at(data: &[u8], offset: usize, field: &str) -> Result<u16, ParseError> {
     let bytes = data
         .get(offset..offset + 2)
@@ -184,7 +148,6 @@ fn read_u16_at(data: &[u8], offset: usize, field: &str) -> Result<u16, ParseErro
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-/// Read a u32 from `data` at `offset` (little-endian).
 fn read_u32_at(data: &[u8], offset: usize, field: &str) -> Result<u32, ParseError> {
     let bytes = data
         .get(offset..offset + 4)
@@ -192,7 +155,6 @@ fn read_u32_at(data: &[u8], offset: usize, field: &str) -> Result<u32, ParseErro
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-/// Read a u64 from `data` at `offset` (little-endian).
 fn read_u64_at(data: &[u8], offset: usize, field: &str) -> Result<u64, ParseError> {
     let bytes = data
         .get(offset..offset + 8)
@@ -202,18 +164,13 @@ fn read_u64_at(data: &[u8], offset: usize, field: &str) -> Result<u64, ParseErro
     ]))
 }
 
-/// Try to read a u32 from `data` at `offset`. Returns 0 if out of bounds.
-/// Used for non-critical fields where truncation is tolerable (e.g. data
-/// directory entries at the end of a truncated optional header).
+/// Returns 0 on truncation; used for non-critical fields like trailing data directory entries.
 fn read_u32_or_zero(data: &[u8], offset: usize) -> u32 {
     data.get(offset..offset + 4)
         .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// Read a null-terminated ASCII string from `data` at `offset`.
-///
-/// Stops at the first null byte, at `MAX_ASCII_STRING_LEN`, or at end-of-file —
-/// whichever comes first. Returns an empty string if `offset` is out of bounds.
+/// Stops at the first null byte, `MAX_ASCII_STRING_LEN`, or EOF.
 fn read_ascii_string(data: &[u8], offset: usize) -> String {
     if offset >= data.len() {
         return String::new();
@@ -224,15 +181,8 @@ fn read_ascii_string(data: &[u8], offset: usize) -> String {
     remaining[..len].iter().map(|&b| b as char).collect()
 }
 
-// ──────────────────────────────────────────────
-// DOS Header (64 bytes, starts at offset 0)
-// ──────────────────────────────────────────────
-
-/// The DOS header occupies the first 64 bytes of any PE file.
-///
-/// Only two fields matter for PE parsing:
-/// - `e_magic` at offset 0x00 — must be 0x5A4D ("MZ")
-/// - `e_lfanew` at offset 0x3C — file offset to the PE signature
+/// First 64 bytes. `e_magic` must be 0x5A4D, `e_lfanew` at offset 0x3C
+/// points to the PE signature.
 #[derive(Debug, Clone)]
 pub struct DosHeader {
     pub e_magic: u16,
@@ -256,8 +206,6 @@ impl DosHeader {
 
         let e_lfanew = read_u32_at(data, E_LFANEW_OFFSET, "e_lfanew")?;
 
-        // Sanity-check e_lfanew: it must point somewhere inside the file
-        // with enough room for the PE signature + COFF header (24 bytes).
         let min_pe_end = e_lfanew as usize + PE_SIGNATURE_SIZE + COFF_HEADER_SIZE;
         if min_pe_end > data.len() {
             return Err(ParseError::malformed(format!(
@@ -270,11 +218,7 @@ impl DosHeader {
     }
 }
 
-// ──────────────────────────────────────────────
-// PE Signature + COFF File Header
-// At offset e_lfanew: 4-byte signature + 20-byte COFF header
-// ──────────────────────────────────────────────
-
+/// 4-byte PE signature + 20-byte COFF header at e_lfanew.
 #[derive(Debug, Clone)]
 pub struct CoffHeader {
     pub machine: u16,
@@ -361,10 +305,6 @@ impl CoffHeader {
     }
 }
 
-// ──────────────────────────────────────────────
-// Optional Header + Data Directories
-// ──────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy)]
 pub struct DataDirectory {
     pub virtual_address: u32,
@@ -393,8 +333,6 @@ pub struct OptionalHeader {
 }
 
 impl OptionalHeader {
-    /// Parse from file data. `offset` is the first byte of the optional header
-    /// (immediately after the COFF header).
     pub fn parse(
         data: &[u8],
         offset: usize,
@@ -415,7 +353,6 @@ impl OptionalHeader {
             ));
         }
 
-        // We need at least 2 bytes to read the magic and determine the format.
         if declared_size < 2 {
             return Err(ParseError::malformed(format!(
                 "SizeOfOptionalHeader ({declared_size}) is too small to contain optional header magic"
@@ -434,8 +371,7 @@ impl OptionalHeader {
             }
         };
 
-        // Minimum size for the fixed portion of the optional header
-        // (before data directories): PE32 = 96 bytes, PE32+ = 112 bytes.
+        // Fixed portion before data directories: PE32 = 96, PE32+ = 112.
         let fixed_size = if is_pe32_plus { 112 } else { 96 };
         if declared_size < fixed_size {
             return Err(ParseError::malformed(format!(
@@ -455,9 +391,7 @@ impl OptionalHeader {
             u64::from(read_u32_at(data, offset + 28, "ImageBase")?)
         };
 
-        // Field offsets differ between PE32 and PE32+ because ImageBase is
-        // 4 bytes in PE32 and 8 bytes in PE32+. Everything after ImageBase
-        // shifts accordingly. Use absolute offsets from the PE spec.
+        // PE32+ shifts later fields by 4 because ImageBase is 8 bytes (vs 4 in PE32).
         let (sa, fa, osv, soi, soh, cs, ss, dc, nrva) = if is_pe32_plus {
             (32, 36, 40, 56, 60, 64, 68, 70, 108)
         } else {
@@ -475,10 +409,8 @@ impl OptionalHeader {
         let dll_characteristics = read_u16_at(data, offset + dc, "DllCharacteristics")?;
         let number_of_rva_and_sizes = read_u32_at(data, offset + nrva, "NumberOfRvaAndSizes")?;
 
-        // Sanity-check: the PE spec defines at most 16 data directory entries.
-        // Also require the declared directory count to fit inside
-        // SizeOfOptionalHeader; otherwise a malformed header could bleed into
-        // the section table and make those bytes look like data directories.
+        // Cap at 16 (spec max) and ensure they fit in SizeOfOptionalHeader so a
+        // bogus count can't bleed into the section table.
         let declared_dirs = (number_of_rva_and_sizes as usize).min(16);
         let dir_bytes_offset = nrva + 4;
         let available_dirs =
@@ -592,10 +524,6 @@ impl OptionalHeader {
     }
 }
 
-// ──────────────────────────────────────────────
-// Section Table
-// ──────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct SectionHeader {
     pub name: String,
@@ -607,7 +535,6 @@ pub struct SectionHeader {
 }
 
 impl SectionHeader {
-    /// Parse `count` section headers starting at `offset` in the file.
     pub fn parse_all(data: &[u8], offset: usize, count: u16) -> Result<Vec<Self>, ParseError> {
         let count = count as usize;
         let required = offset + count * SECTION_HEADER_SIZE;
@@ -624,7 +551,7 @@ impl SectionHeader {
         for i in 0..count {
             let off = offset + i * SECTION_HEADER_SIZE;
 
-            // Name: 8 bytes, null-padded ASCII.
+            // 8-byte null-padded ASCII name.
             let name_bytes = &data[off..off + 8];
             let name = String::from_utf8_lossy(name_bytes)
                 .trim_end_matches('\0')
@@ -664,8 +591,7 @@ impl SectionHeader {
         )
     }
 
-    /// Return the raw bytes of this section from the file, clamped to file bounds.
-    /// Returns an empty slice if the pointer is out of range.
+    /// Section bytes clamped to file bounds; empty if pointer is past EOF.
     pub fn raw_data<'a>(&self, file_data: &'a [u8]) -> &'a [u8] {
         let start = self.pointer_to_raw_data as usize;
         let end = start.saturating_add(self.size_of_raw_data as usize);
@@ -677,19 +603,11 @@ impl SectionHeader {
     }
 }
 
-/// File offset where the section table begins.
 pub fn section_table_offset(pe_offset: usize, size_of_optional_header: u16) -> usize {
     pe_offset + PE_SIGNATURE_SIZE + COFF_HEADER_SIZE + size_of_optional_header as usize
 }
 
-// ──────────────────────────────────────────────
-// RVA-to-file-offset conversion
-// ──────────────────────────────────────────────
-
-/// Convert a Relative Virtual Address to a file offset using the section table.
-///
-/// Finds which section contains the RVA and computes:
-///   `file_offset = rva - virtual_address + pointer_to_raw_data`
+/// `file_offset = rva - virtual_address + pointer_to_raw_data`.
 pub fn rva_to_offset(rva: u32, sections: &[SectionHeader]) -> Option<usize> {
     for sec in sections {
         let start = sec.virtual_address;
@@ -702,21 +620,13 @@ pub fn rva_to_offset(rva: u32, sections: &[SectionHeader]) -> Option<usize> {
     None
 }
 
-// ──────────────────────────────────────────────
-// Import Table
-// ──────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct ImportEntry {
     pub dll_name: String,
     pub functions: Vec<String>,
 }
 
-/// Parse the import directory table.
-///
-/// The import directory is an array of `IMAGE_IMPORT_DESCRIPTOR` (20 bytes each),
-/// terminated by an all-zero entry. Each descriptor points to a DLL name and
-/// a list of imported functions (the Import Name Table / Import Address Table).
+/// Walks the IMAGE_IMPORT_DESCRIPTOR array (20 bytes each, all-zero terminator).
 pub fn parse_imports(
     data: &[u8],
     import_rva: u32,
@@ -739,7 +649,6 @@ pub fn parse_imports(
         let name_rva = read_u32_or_zero(data, desc_offset + 12);
         let first_thunk = read_u32_or_zero(data, desc_offset + 16);
 
-        // All-zero descriptor terminates the import directory.
         if name_rva == 0 && original_first_thunk == 0 && first_thunk == 0 {
             break;
         }
@@ -749,9 +658,7 @@ pub fn parse_imports(
             None => format!("<invalid RVA 0x{name_rva:08X}>"),
         };
 
-        // Prefer the OriginalFirstThunk (INT) when available; fall back to
-        // FirstThunk (IAT). The INT is the authoritative list; the IAT may
-        // have been overwritten by the loader at runtime.
+        // Prefer INT (OriginalFirstThunk); the IAT (FirstThunk) may be loader-overwritten.
         let thunk_rva = if original_first_thunk != 0 {
             original_first_thunk
         } else {
@@ -769,11 +676,8 @@ pub fn parse_imports(
     imports
 }
 
-/// Parse a null-terminated array of thunk values (`IMAGE_THUNK_DATA`).
-///
-/// Each entry is either:
-/// - An ordinal import (high bit set, low 16 bits = ordinal number)
-/// - A name import (RVA to `IMAGE_IMPORT_BY_NAME`: 2-byte hint + null-terminated name)
+/// IMAGE_THUNK_DATA array: high bit set = ordinal (low 16 bits),
+/// otherwise RVA to IMAGE_IMPORT_BY_NAME (2-byte hint + name).
 fn parse_thunk_array(
     data: &[u8],
     thunk_rva: u32,
@@ -814,15 +718,10 @@ fn parse_thunk_array(
         if is_ordinal {
             functions.push(format!("#{}", value & 0xFFFF));
         } else {
-            // For PE32 the value is already 32-bit; for PE32+ the RVA portion
-            // is the low 31 bits (bit 31 is the ordinal flag, already checked).
             #[allow(clippy::cast_possible_truncation)]
             let name_rva = value as u32;
             match rva_to_offset(name_rva, sections) {
-                Some(off) => {
-                    // IMAGE_IMPORT_BY_NAME: skip 2-byte hint, read name.
-                    functions.push(read_ascii_string(data, off + 2));
-                }
+                Some(off) => functions.push(read_ascii_string(data, off + 2)),
                 None => functions.push(format!("<bad RVA 0x{name_rva:08X}>")),
             }
         }
@@ -833,17 +732,12 @@ fn parse_thunk_array(
     functions
 }
 
-// ──────────────────────────────────────────────
-// Export Table
-// ──────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct ExportInfo {
     pub dll_name: String,
     pub functions: Vec<String>,
 }
 
-/// Parse the export directory table (data directory index 0).
 pub fn parse_exports(
     data: &[u8],
     export_rva: u32,
@@ -858,7 +752,6 @@ pub fn parse_exports(
     let number_of_names = read_u32_or_zero(data, base + 24) as usize;
     let names_rva = read_u32_or_zero(data, base + 32);
 
-    // Cap the name count to prevent huge allocations on malformed exports.
     let number_of_names = number_of_names.min(MAX_THUNK_ENTRIES);
 
     let dll_name = rva_to_offset(name_rva, sections)
@@ -881,27 +774,10 @@ pub fn parse_exports(
     })
 }
 
-// ──────────────────────────────────────────────
-// TLS (Thread Local Storage) Directory
-// ──────────────────────────────────────────────
-//
-// TLS callbacks execute before the entry point — before a debugger can
-// attach. Standard anti-debug and unpacker-stub hiding place.
-//
-// IMAGE_TLS_DIRECTORY uses Virtual Addresses, not RVAs. Convert
-// VA → RVA by subtracting ImageBase, then RVA → file offset.
-//
-// Layout (offsets into the TLS directory):
-//              PE32   PE32+
-//   StartAddressOfRawData   0x00   0x00
-//   EndAddressOfRawData     0x04   0x08
-//   AddressOfIndex          0x08   0x10
-//   AddressOfCallBacks      0x0C   0x18
-//
-// AddressOfCallBacks points to a null-terminated array of function
-// pointers (4 bytes on PE32, 8 on PE32+).
+// IMAGE_TLS_DIRECTORY uses VAs (subtract ImageBase to get RVA).
+// AddressOfCallBacks: PE32 offset 0x0C, PE32+ offset 0x18; points to a
+// null-terminated array of function pointers (4 or 8 bytes per entry).
 
-/// Upper bound per binary. Real binaries have 0–2.
 const MAX_TLS_CALLBACKS: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -928,8 +804,6 @@ pub fn parse_tls(
         return None;
     }
 
-    // VA → RVA → file offset. `checked_sub` guards against crafted VAs
-    // below ImageBase; `try_from` guards against RVAs that don't fit u32.
     let callbacks_rva = u32::try_from(callbacks_va.checked_sub(image_base)?).ok()?;
     let callbacks_offset = rva_to_offset(callbacks_rva, sections)?;
 
@@ -958,10 +832,6 @@ pub fn parse_tls(
 
     Some(TlsInfo { callbacks })
 }
-
-// ──────────────────────────────────────────────
-// Tests
-// ──────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1056,7 +926,7 @@ mod tests {
 
     #[test]
     fn ascii_string_respects_max_length() {
-        // No null terminator in sight — should still stop.
+        // No null terminator in sight - should still stop.
         let data = vec![0x41u8; MAX_ASCII_STRING_LEN + 100];
         let s = read_ascii_string(&data, 0);
         assert_eq!(s.len(), MAX_ASCII_STRING_LEN);

@@ -1,22 +1,8 @@
-// authenticode.rs — Locate and validate the Authenticode signature blob.
+// WIN_CERTIFICATE unwrap + PKCS#7 ContentInfo decode.
 //
-// A signed PE places its signature in the certificate table, pointed to by
-// data directory index 4 (DIR_SECURITY). Unlike every other data directory,
-// DIR_SECURITY.VirtualAddress is a FILE OFFSET, not an RVA — the cert table
-// sits outside any section.
-//
-// Wire format at that offset:
-//
-//   WIN_CERTIFICATE {
-//       DWORD dwLength;          // total length including this header
-//       WORD  wRevision;         // 0x0200 = revision 2
-//       WORD  wCertificateType;  // 0x0002 = PKCS_7_SIGNED_DATA
-//       BYTE  bCertificate[];    // DER-encoded PKCS#7 ContentInfo
-//   }
-//
-// Phase 1a: unwrap the header, confirm the inner blob is a valid PKCS#7
-// ContentInfo, report bookkeeping (blob size, content-type OID).
-// Phase 1b will extract signer cert, digest algorithm, and chain details.
+// DIR_SECURITY.virtual_address is a file offset, not an RVA. WIN_CERTIFICATE
+// header is 8 bytes (dwLength, wRevision, wCertificateType) followed by the
+// DER-encoded PKCS#7 ContentInfo, padded to an 8-byte boundary.
 
 use crate::pe::{DIR_SECURITY, OptionalHeader};
 use cms::content_info::ContentInfo;
@@ -24,18 +10,12 @@ use der::Decode;
 
 const WIN_CERT_HEADER_SIZE: usize = 8;
 const WIN_CERT_TYPE_PKCS_SIGNED_DATA: u16 = 0x0002;
-
-/// OID 1.2.840.113549.1.7.2 — PKCS#7 signedData content type.
-/// Every Authenticode signature's ContentInfo wraps this OID.
 const OID_PKCS7_SIGNED_DATA: &str = "1.2.840.113549.1.7.2";
 
 #[derive(Debug, Clone)]
 pub enum SignatureStatus {
-    /// No security directory, or directory is empty.
     Unsigned,
-    /// Directory is present but doesn't parse as a valid Authenticode blob.
     Malformed(String),
-    /// WIN_CERTIFICATE unwrapped and PKCS#7 ContentInfo decoded successfully.
     Present(PresentSignature),
 }
 
@@ -45,23 +25,18 @@ pub struct PresentSignature {
     pub win_cert_revision: u16,
     pub win_cert_type: u16,
     pub content_type_oid: String,
-    /// `true` if the content-type OID is PKCS#7 SignedData (expected).
     pub is_signed_data: bool,
 }
 
-/// Entry point: inspect the PE's security directory and return a status.
 pub fn analyze(data: &[u8], opt: &OptionalHeader) -> SignatureStatus {
-    // Look up DIR_SECURITY. Missing or zero-size means unsigned.
     let sec_dir = match opt.data_directories.get(DIR_SECURITY) {
         Some(d) if d.virtual_address != 0 && d.size != 0 => d,
         _ => return SignatureStatus::Unsigned,
     };
 
-    // `virtual_address` here is really a file offset (see module header).
     let offset = sec_dir.virtual_address as usize;
     let size = sec_dir.size as usize;
 
-    // Range-check the whole directory against file length.
     let Some(end) = offset.checked_add(size) else {
         return SignatureStatus::Malformed(format!(
             "security directory offset+size overflows: {offset} + {size}"
@@ -79,7 +54,6 @@ pub fn analyze(data: &[u8], opt: &OptionalHeader) -> SignatureStatus {
         ));
     }
 
-    // Parse the WIN_CERTIFICATE header.
     let hdr = &data[offset..offset + WIN_CERT_HEADER_SIZE];
     let dw_length = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
     let w_revision = u16::from_le_bytes([hdr[4], hdr[5]]);
@@ -101,9 +75,7 @@ pub fn analyze(data: &[u8], opt: &OptionalHeader) -> SignatureStatus {
         ));
     }
 
-    // Inner DER blob follows the 8-byte header. WIN_CERTIFICATE.dwLength is
-    // rounded up to an 8-byte boundary, so the blob may contain up to 7
-    // trailing zero bytes of padding. Trim to the real DER TLV length.
+    // dwLength is rounded up to 8 bytes; trim trailing padding via the DER length prefix.
     let padded_blob = &data[offset + WIN_CERT_HEADER_SIZE..offset + dw_length];
     let der_len = match der_tlv_total_length(padded_blob) {
         Some(n) if n <= padded_blob.len() => n,
@@ -121,8 +93,6 @@ pub fn analyze(data: &[u8], opt: &OptionalHeader) -> SignatureStatus {
     };
     let blob = &padded_blob[..der_len];
 
-    // Decode the outermost PKCS#7 wrapper to confirm structural validity.
-    // Full SignerInfo + cert chain parsing comes in Phase 1b.
     let ci = match ContentInfo::from_der(blob) {
         Ok(ci) => ci,
         Err(e) => {
@@ -144,21 +114,15 @@ pub fn analyze(data: &[u8], opt: &OptionalHeader) -> SignatureStatus {
     })
 }
 
-/// Parse a DER TLV header and return the total encoded length
-/// (tag byte + length bytes + contents).
-///
-/// Strips the 8-byte alignment padding that WIN_CERTIFICATE tacks onto the
-/// end of a PKCS#7 blob.
+/// Total length of the first DER TLV in `blob` (tag + length bytes + value).
 fn der_tlv_total_length(blob: &[u8]) -> Option<usize> {
     if blob.len() < 2 {
         return None;
     }
     let len_byte = blob[1];
     if len_byte < 0x80 {
-        // Short form: this byte *is* the length.
         Some(2 + len_byte as usize)
     } else {
-        // Long form: low 7 bits = number of subsequent length-octets.
         let n = (len_byte & 0x7F) as usize;
         if n == 0 || n > 8 || blob.len() < 2 + n {
             return None;
@@ -171,16 +135,11 @@ fn der_tlv_total_length(blob: &[u8]) -> Option<usize> {
     }
 }
 
-// ──────────────────────────────────────────────
-// Tests
-// ──────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pe::DataDirectory;
 
-    /// Build an OptionalHeader stub with a specific security directory.
     fn opt_with_security(va: u32, size: u32) -> OptionalHeader {
         let mut dirs = vec![
             DataDirectory {
@@ -214,8 +173,6 @@ mod tests {
         }
     }
 
-    /// Start cert table at this file offset in test fixtures. Non-zero because
-    /// a VA of 0 is treated as "unsigned" by `analyze`.
     const TEST_VA: u32 = 16;
 
     #[test]
@@ -236,7 +193,6 @@ mod tests {
 
     #[test]
     fn malformed_when_header_too_small() {
-        // Directory claims 4 bytes, less than WIN_CERTIFICATE header (8).
         let opt = opt_with_security(TEST_VA, 4);
         let data = vec![0u8; 32];
         assert!(matches!(
@@ -247,7 +203,6 @@ mod tests {
 
     #[test]
     fn malformed_when_cert_type_unknown() {
-        // dwLength=8 (just the header), revision=0x0200, certType=0x0001 (unsupported).
         let mut data = vec![0u8; 32];
         let base = TEST_VA as usize;
         data[base..base + 8].copy_from_slice(&[0x08, 0x00, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00]);
@@ -260,16 +215,12 @@ mod tests {
 
     #[test]
     fn malformed_when_pkcs7_blob_invalid() {
-        // Valid WIN_CERTIFICATE framing, but the inner blob is random bytes.
         let mut data = vec![0u8; 64];
         let base = TEST_VA as usize;
-        // dwLength = 24 (header 8 + garbage 16), revision = 0x0200, certType = 0x0002.
         data[base..base + 8].copy_from_slice(&[0x18, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00]);
         data[base + 8..base + 24].fill(0xAA);
         let opt = opt_with_security(TEST_VA, 24);
         match analyze(&data, &opt) {
-            // Depending on the garbage byte we may fail at length-prefix or
-            // at decode. Either Malformed outcome is correct.
             SignatureStatus::Malformed(_) => {}
             other => panic!("expected Malformed, got {other:?}"),
         }
@@ -277,14 +228,12 @@ mod tests {
 
     #[test]
     fn der_length_short_form() {
-        // Short-form: tag 0x30, length 0x05, then 5 content bytes = 7 total.
         let blob = [0x30, 0x05, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x99, 0x99];
         assert_eq!(der_tlv_total_length(&blob), Some(7));
     }
 
     #[test]
     fn der_length_long_form_two_bytes() {
-        // 0x30 0x82 0x01 0x00 → tag + 2-byte length field + 0x0100 content bytes.
         let mut blob = vec![0x30, 0x82, 0x01, 0x00];
         blob.extend(std::iter::repeat_n(0u8, 0x100));
         assert_eq!(der_tlv_total_length(&blob), Some(4 + 0x100));
@@ -293,7 +242,6 @@ mod tests {
     #[test]
     fn der_length_handles_truncated_input() {
         assert_eq!(der_tlv_total_length(&[0x30]), None);
-        // Long-form claiming 5 length bytes but buffer only has 2.
         assert_eq!(der_tlv_total_length(&[0x30, 0x85]), None);
     }
 }

@@ -1,25 +1,10 @@
-//! High-level analysis pipeline. Single source of truth for the CLI, the
-//! Python bindings, and any future HTTP / gRPC surface.
+//! Analysis pipeline shared by the CLI and Python bindings.
 //!
-//! Two layers live here:
-//!
-//! 1. [`Analysis`] — the raw parsed PE structures plus the analytical
-//!    findings (strings, hashes, signature, triage). Internal consumers
-//!    (the `prust` CLI's text renderer) walk these directly because they
-//!    need fields that don't belong in a JSON report — DOS stub bytes,
-//!    raw pointers, data-directory table, etc.
-//!
-//! 2. [`Report`] — a fully serializable projection of [`Analysis`].
-//!    This is what `--json` emits, what Python callers receive as a dict,
-//!    and what pipelines ingest. Strings and numbers only; no references.
-//!
-//! Callers needing only the serializable form do
-//! `api::analyze_bytes(data)?.to_report(path)` and drop the Analysis.
+//! [`Analysis`] holds parsed structures plus owned file bytes; [`Report`] is
+//! the serializable projection consumed by `--json` and `pythonize`.
 
-use crate::{authenticode, entropy, hashes, overlay, patterns, pe, rules, strings};
+use crate::{authenticode, entropy, hashes, loldrivers, overlay, patterns, pe, rules, strings};
 use serde::Serialize;
-
-// ─── Serializable report types ──────────────────────────────────────────
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Report {
@@ -29,6 +14,8 @@ pub struct Report {
     pub sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub imphash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authentihash: Option<String>,
     pub machine: String,
     pub pe_type: String,
     pub subsystem: String,
@@ -47,6 +34,8 @@ pub struct Report {
     pub string_count: usize,
     pub interesting_strings: Vec<String>,
     pub pattern_hits: Vec<ReportPatternHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loldrivers_match: Option<ReportLolDriversMatch>,
     pub triage: rules::TriageResult,
 }
 
@@ -99,6 +88,30 @@ pub struct ReportPatternHit {
     pub description: String,
 }
 
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportLolDriversMatch {
+    pub matched_by: String,
+    pub driver_id: String,
+    pub filename: String,
+    pub category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mitre_id: Option<String>,
+    pub tags: Vec<String>,
+}
+
+impl From<&loldrivers::DriverMatch> for ReportLolDriversMatch {
+    fn from(m: &loldrivers::DriverMatch) -> Self {
+        Self {
+            matched_by: m.kind.as_str().to_string(),
+            driver_id: m.entry.id.clone(),
+            filename: m.entry.filename.clone(),
+            category: m.entry.category.clone(),
+            mitre_id: m.entry.mitre_id.clone(),
+            tags: m.entry.tags.clone(),
+        }
+    }
+}
+
 impl From<&authenticode::SignatureStatus> for ReportSignature {
     fn from(s: &authenticode::SignatureStatus) -> Self {
         match s {
@@ -117,11 +130,8 @@ impl From<&authenticode::SignatureStatus> for ReportSignature {
     }
 }
 
-// ─── Raw analysis payload ───────────────────────────────────────────────
-
-/// Full analysis result. Owns the original file bytes so the caller
-/// doesn't have to keep a parallel buffer alive for later entropy /
-/// raw-data lookups.
+/// Owns the file bytes; downstream consumers can re-read sections without
+/// keeping a parallel buffer alive.
 pub struct Analysis {
     pub data: Vec<u8>,
     pub dos: pe::DosHeader,
@@ -136,14 +146,10 @@ pub struct Analysis {
     pub pattern_hits: Vec<patterns::PatternHit>,
     pub file_hashes: hashes::FileHashes,
     pub signature: authenticode::SignatureStatus,
+    pub loldrivers_match: Option<loldrivers::DriverMatch>,
     pub triage: rules::TriageResult,
 }
 
-// ─── Interesting-string filtering ───────────────────────────────────────
-
-/// Patterns that are interesting in a malware triage context — C2 URLs,
-/// persistence mechanisms, shell interpreters, credential-related terms,
-/// injection API names.
 pub const INTERESTING_PATTERNS: &[&str] = &[
     "http://",
     "https://",
@@ -183,20 +189,16 @@ pub const INTERESTING_PATTERNS: &[&str] = &[
     "DROP ",
 ];
 
-/// Keep the report focused; analysts don't want to scroll through 500 strings.
 pub const MAX_INTERESTING_STRINGS: usize = 100;
 
-/// Filter extracted strings down to those matching suspicious patterns.
 pub fn filter_interesting(strings_in: &[strings::ExtractedString]) -> Vec<String> {
     let mut result = Vec::new();
     for s in strings_in {
-        // ASCII-only case fold — our patterns are ASCII, and this skips the
-        // Unicode case-folding tables `to_lowercase()` would pull in.
         let lower = s.value.to_ascii_lowercase();
         for pattern in INTERESTING_PATTERNS {
             if lower.contains(&pattern.to_ascii_lowercase()) {
                 result.push(format!("0x{:08X} [{}] {}", s.offset, s.encoding, s.value));
-                break; // one match is enough; avoid duplicates
+                break;
             }
         }
         if result.len() >= MAX_INTERESTING_STRINGS {
@@ -206,14 +208,12 @@ pub fn filter_interesting(strings_in: &[strings::ExtractedString]) -> Vec<String
     result
 }
 
-// ─── Pipeline ───────────────────────────────────────────────────────────
-
-/// Run the full analysis pipeline on a file's bytes.
-///
-/// Takes ownership of the buffer; the returned [`Analysis`] retains it so
-/// downstream consumers can recompute entropy per section, re-scan strings,
-/// etc. without re-reading from disk.
-pub fn analyze_bytes(data: Vec<u8>) -> Result<Analysis, Box<dyn std::error::Error>> {
+/// Takes ownership of `data`; the returned [`Analysis`] retains it.
+/// `lol_db = None` skips the LOLDrivers lookup.
+pub fn analyze_bytes(
+    data: Vec<u8>,
+    lol_db: Option<&loldrivers::LolDriversDb>,
+) -> Result<Analysis, Box<dyn std::error::Error>> {
     let dos = pe::DosHeader::parse(&data)?;
     let pe_offset = dos.e_lfanew as usize;
     let coff = pe::CoffHeader::parse(&data, pe_offset)?;
@@ -254,11 +254,9 @@ pub fn analyze_bytes(data: Vec<u8>) -> Result<Analysis, Box<dyn std::error::Erro
 
     let extracted_strings = strings::extract_all(&data);
 
-    // Scan patterns from the first section onward to avoid false-positive
-    // MZ/PE hits in the loader's own header region.
+    // Skip headers to avoid false MZ/PE hits, then re-anchor offsets.
     let scan_start = patterns::first_section_offset(&sections).min(data.len());
     let pattern_hits_raw = patterns::scan_all(&data[scan_start..], &patterns::builtin_patterns());
-    // Adjust hit offsets back to absolute file offsets.
     let pattern_hits: Vec<patterns::PatternHit> = pattern_hits_raw
         .into_iter()
         .map(|mut h| {
@@ -267,9 +265,18 @@ pub fn analyze_bytes(data: Vec<u8>) -> Result<Analysis, Box<dyn std::error::Erro
         })
         .collect();
 
-    let file_hashes = hashes::compute(&data, &imports);
+    let mut file_hashes = hashes::compute(&data, &imports);
+    file_hashes.authentihash = hashes::authentihash_sha256(&data, &opt, &sections, pe_offset);
 
     let signature = authenticode::analyze(&data, &opt);
+
+    let loldrivers_match = lol_db.and_then(|db| {
+        db.lookup(
+            &file_hashes.sha256,
+            file_hashes.authentihash.as_deref(),
+            file_hashes.imphash.as_deref(),
+        )
+    });
 
     let triage = rules::analyze(
         &coff,
@@ -280,6 +287,7 @@ pub fn analyze_bytes(data: Vec<u8>) -> Result<Analysis, Box<dyn std::error::Erro
         tls.as_ref(),
         overlay_info.as_ref(),
         &pattern_hits,
+        loldrivers_match.as_ref(),
     );
 
     Ok(Analysis {
@@ -296,14 +304,12 @@ pub fn analyze_bytes(data: Vec<u8>) -> Result<Analysis, Box<dyn std::error::Erro
         pattern_hits,
         file_hashes,
         signature,
+        loldrivers_match,
         triage,
     })
 }
 
 impl Analysis {
-    /// Build the serializable, JSON/Python-friendly report for this analysis.
-    /// Takes `path` as a separate argument because [`Analysis`] itself is
-    /// path-agnostic — it's just the parsed bytes.
     pub fn to_report(&self, path: &str) -> Report {
         Report {
             file: path.to_string(),
@@ -311,6 +317,7 @@ impl Analysis {
             md5: self.file_hashes.md5.clone(),
             sha256: self.file_hashes.sha256.clone(),
             imphash: self.file_hashes.imphash.clone(),
+            authentihash: self.file_hashes.authentihash.clone(),
             machine: self.coff.machine_name().to_string(),
             pe_type: if self.opt.is_pe32_plus() {
                 "PE32+"
@@ -383,6 +390,10 @@ impl Analysis {
                     description: h.description.to_string(),
                 })
                 .collect(),
+            loldrivers_match: self
+                .loldrivers_match
+                .as_ref()
+                .map(ReportLolDriversMatch::from),
             triage: self.triage.clone(),
         }
     }

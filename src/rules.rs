@@ -1,19 +1,12 @@
-// rules.rs — Detection rules and suspicion scoring.
-//
-// Each rule checks for one suspicious trait in the parsed PE.
-// A finding carries a severity (1–10) and a human-readable description.
-// The triage score is the sum of all severities.
+// Detection rules and triage scoring.
 
 use crate::entropy;
+use crate::loldrivers::{DriverMatch, MatchKind};
 use crate::overlay::OverlayInfo;
 use crate::patterns::PatternHit;
 use crate::pe::{CoffHeader, ImportEntry, OptionalHeader, SectionHeader, TlsInfo};
 
 use serde::Serialize;
-
-// ──────────────────────────────────────────────
-// Data structures
-// ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
@@ -41,11 +34,6 @@ impl TriageResult {
     }
 }
 
-// ──────────────────────────────────────────────
-// Top-level analysis entry point
-// ──────────────────────────────────────────────
-
-/// Run all detection rules and return the aggregated triage result.
 #[allow(clippy::too_many_arguments)]
 pub fn analyze(
     coff: &CoffHeader,
@@ -56,9 +44,11 @@ pub fn analyze(
     tls: Option<&TlsInfo>,
     overlay: Option<&OverlayInfo>,
     pattern_hits: &[PatternHit],
+    loldrivers_match: Option<&DriverMatch>,
 ) -> TriageResult {
     let mut findings = Vec::new();
 
+    check_known_vulnerable_driver(loldrivers_match, &mut findings);
     check_rwx_sections(sections, &mut findings);
     check_high_entropy_code(sections, file_data, &mut findings);
     check_suspicious_section_names(sections, &mut findings);
@@ -84,12 +74,26 @@ pub fn analyze(
     }
 }
 
-// ──────────────────────────────────────────────
-// Individual rules
-// ──────────────────────────────────────────────
+/// SHA256/authentihash matches force CRITICAL verdict on otherwise-clean binaries.
+fn check_known_vulnerable_driver(db_match: Option<&DriverMatch>, findings: &mut Vec<Finding>) {
+    let Some(m) = db_match else { return };
+    let severity = match m.kind {
+        MatchKind::Sha256 | MatchKind::Authentihash => 60,
+        MatchKind::Imphash => 25,
+    };
+    findings.push(Finding {
+        rule: "KNOWN_VULNERABLE_DRIVER",
+        severity,
+        description: format!(
+            "Matches LOLDrivers entry '{}' ({}) [match: {}, MITRE: {}]",
+            m.entry.filename,
+            m.entry.category,
+            m.kind.as_str(),
+            m.entry.mitre_id.as_deref().unwrap_or("none"),
+        ),
+    });
+}
 
-/// RWX sections: readable + writable + executable.
-/// Legitimate binaries almost never need this. Packers and shellcode do.
 fn check_rwx_sections(sections: &[SectionHeader], findings: &mut Vec<Finding>) {
     for sec in sections {
         if sec.is_readable() && sec.is_writable() && sec.is_executable() {
@@ -105,7 +109,6 @@ fn check_rwx_sections(sections: &[SectionHeader], findings: &mut Vec<Finding>) {
     }
 }
 
-/// High entropy in a code section suggests packing or encryption.
 fn check_high_entropy_code(
     sections: &[SectionHeader],
     file_data: &[u8],
@@ -125,7 +128,7 @@ fn check_high_entropy_code(
                 rule: "HIGH_ENTROPY_CODE",
                 severity: 7,
                 description: format!(
-                    "Executable section '{}' has very high entropy ({:.4}) — likely packed/encrypted",
+                    "Executable section '{}' has very high entropy ({:.4}) - likely packed/encrypted",
                     sec.name, ent
                 ),
             });
@@ -142,14 +145,12 @@ fn check_high_entropy_code(
     }
 }
 
-/// Known packer section names (UPX, ASPack, MPRESS, etc).
 const PACKER_NAMES: &[&str] = &[
     "UPX0", "UPX1", "UPX2", ".UPX", ".aspack", ".adata", "ASPack", ".nsp0", ".nsp1", ".nsp2",
     "MEW", ".perplex", ".packed", ".RLPack", "PELOCKnt", ".petite", ".yP", "WinLicen", "_winzip_",
     ".MPRESS1", ".MPRESS2",
 ];
 
-/// Standard section names produced by common compilers/linkers.
 const NORMAL_SECTION_NAMES: &[&str] = &[
     ".text", ".rdata", ".data", ".pdata", ".rsrc", ".reloc", ".bss", ".edata", ".idata", ".tls",
     ".debug", ".CRT", ".gfids", ".00cfg", ".didat", "fothk", ".xdata", "PAGE", "INIT", ".mrdata",
@@ -159,7 +160,6 @@ fn check_suspicious_section_names(sections: &[SectionHeader], findings: &mut Vec
     for sec in sections {
         let name = &sec.name;
 
-        // Check for known packer section names.
         let is_packer = PACKER_NAMES.iter().any(|p| name.eq_ignore_ascii_case(p));
         if is_packer {
             findings.push(Finding {
@@ -170,8 +170,6 @@ fn check_suspicious_section_names(sections: &[SectionHeader], findings: &mut Vec
             continue;
         }
 
-        // Flag names with non-printable characters (not in normal list,
-        // not dot-prefixed, non-empty).
         let is_known = NORMAL_SECTION_NAMES.iter().any(|&n| n == name);
         if !is_known && !name.starts_with('.') && !name.is_empty() {
             let has_nonprintable = name.bytes().any(|b| !(0x20..=0x7E).contains(&b));
@@ -194,7 +192,7 @@ fn check_no_imports(imports: &[ImportEntry], findings: &mut Vec<Finding>) {
         findings.push(Finding {
             rule: "NO_IMPORTS",
             severity: 7,
-            description: "Binary has no import table — possibly packed or statically resolved"
+            description: "Binary has no import table - possibly packed or statically resolved"
                 .to_string(),
         });
     }
@@ -210,7 +208,7 @@ fn check_few_imports(imports: &[ImportEntry], findings: &mut Vec<Finding>) {
             rule: "FEW_IMPORTS",
             severity: 5,
             description: format!(
-                "Binary imports only {} function(s) from {} DLL(s) — possible packer stub",
+                "Binary imports only {} function(s) from {} DLL(s) - possible packer stub",
                 total_funcs,
                 imports.len()
             ),
@@ -218,7 +216,6 @@ fn check_few_imports(imports: &[ImportEntry], findings: &mut Vec<Finding>) {
     }
 }
 
-/// Suspicious API combinations indicating injection, evasion, or credential theft.
 fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Finding>) {
     let all_funcs: Vec<String> = imports
         .iter()
@@ -228,40 +225,36 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
 
     let has = |name: &str| all_funcs.iter().any(|f| f == name);
 
-    // Classic process injection: alloc → write → execute in remote process
     if has("virtualalloc") && has("writeprocessmemory") && has("createremotethread") {
         findings.push(Finding {
             rule: "PROCESS_INJECTION_COMBO",
             severity: 9,
             description: "Imports VirtualAlloc + WriteProcessMemory + CreateRemoteThread \
-                — classic process injection pattern"
+                - classic process injection pattern"
                 .to_string(),
         });
     }
 
-    // Native API injection variant
     if has("writeprocessmemory") && (has("ntcreatethreadex") || has("rtlcreateuserthread")) {
         findings.push(Finding {
             rule: "NTAPI_INJECTION_COMBO",
             severity: 9,
             description: "Imports WriteProcessMemory + NtCreateThreadEx/RtlCreateUserThread \
-                — native API injection"
+                - native API injection"
                 .to_string(),
         });
     }
 
-    // Shellcode loading: allocate + change protection
     if has("virtualalloc") && has("virtualprotect") {
         findings.push(Finding {
             rule: "SHELLCODE_LOADING",
             severity: 5,
             description: "Imports VirtualAlloc + VirtualProtect \
-                — may allocate and change memory permissions"
+                - may allocate and change memory permissions"
                 .to_string(),
         });
     }
 
-    // Credential prompt APIs
     if has("credentialpromptforwindowsa")
         || has("credentialpromptforwindowsw")
         || has("creduipromptforcredentialsa")
@@ -270,11 +263,10 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
         findings.push(Finding {
             rule: "CREDENTIAL_PROMPT",
             severity: 6,
-            description: "Imports credential prompt APIs — may harvest credentials".to_string(),
+            description: "Imports credential prompt APIs - may harvest credentials".to_string(),
         });
     }
 
-    // Anti-debugging
     if has("isdebuggerpresent")
         || has("checkremotedebuggerpresent")
         || has("ntqueryinformationprocess")
@@ -288,13 +280,12 @@ fn check_suspicious_import_combos(imports: &[ImportEntry], findings: &mut Vec<Fi
         });
     }
 
-    // Dynamic API resolution (requires BOTH GetProcAddress AND a LoadLibrary variant)
     if has("getprocaddress") && (has("loadlibrarya") || has("loadlibraryw")) {
         findings.push(Finding {
             rule: "DYNAMIC_API_RESOLUTION",
             severity: 2,
             description: "Imports GetProcAddress + LoadLibrary \
-                — may resolve APIs dynamically to hide behavior"
+                - may resolve APIs dynamically to hide behavior"
                 .to_string(),
         });
     }
@@ -321,12 +312,11 @@ fn check_no_dep(opt: &OptionalHeader, findings: &mut Vec<Finding>) {
 }
 
 fn check_zero_entry_point(opt: &OptionalHeader, coff: &CoffHeader, findings: &mut Vec<Finding>) {
-    // DLLs can legitimately have a zero entry point.
     if opt.address_of_entry_point == 0 && !coff.is_dll() {
         findings.push(Finding {
             rule: "ZERO_ENTRY_POINT",
             severity: 5,
-            description: "Entry point is 0x00000000 — unusual for an executable".to_string(),
+            description: "Entry point is 0x00000000 - unusual for an executable".to_string(),
         });
     }
 }
@@ -338,7 +328,7 @@ fn check_section_size_mismatch(sections: &[SectionHeader], findings: &mut Vec<Fi
                 rule: "EMPTY_RAW_LARGE_VIRTUAL",
                 severity: 6,
                 description: format!(
-                    "Section '{}' has 0 raw bytes but 0x{:X} virtual bytes — unpacking target?",
+                    "Section '{}' has 0 raw bytes but 0x{:X} virtual bytes - unpacking target?",
                     sec.name, sec.virtual_size
                 ),
             });
@@ -376,7 +366,7 @@ fn check_tls_callbacks(tls: Option<&TlsInfo>, findings: &mut Vec<Finding>) {
             rule: "TLS_CALLBACKS",
             severity: if count > 2 { 7 } else { 4 },
             description: format!(
-                "Binary has {} TLS callback{} — code executes before entry point",
+                "Binary has {} TLS callback{} - code executes before entry point",
                 count,
                 if count == 1 { "" } else { "s" }
             ),
@@ -384,7 +374,6 @@ fn check_tls_callbacks(tls: Option<&TlsInfo>, findings: &mut Vec<Finding>) {
     }
 }
 
-/// Large overlay with high entropy is a strong packer/dropper signal.
 fn check_overlay(overlay: Option<&OverlayInfo>, findings: &mut Vec<Finding>) {
     if let Some(info) = overlay {
         if info.entropy >= 7.0 && info.size >= 4096 {
@@ -392,7 +381,7 @@ fn check_overlay(overlay: Option<&OverlayInfo>, findings: &mut Vec<Finding>) {
                 rule: "HIGH_ENTROPY_OVERLAY",
                 severity: 7,
                 description: format!(
-                    "Overlay at offset 0x{:X} ({} bytes, entropy {:.2}) — \
+                    "Overlay at offset 0x{:X} ({} bytes, entropy {:.2}) - \
                     likely packed/encrypted payload",
                     info.offset, info.size, info.entropy
                 ),
@@ -410,8 +399,6 @@ fn check_overlay(overlay: Option<&OverlayInfo>, findings: &mut Vec<Finding>) {
     }
 }
 
-/// Each pattern hit becomes one finding. Severity and description come
-/// from the pattern definition.
 fn check_patterns(hits: &[PatternHit], findings: &mut Vec<Finding>) {
     for h in hits {
         findings.push(Finding {
@@ -421,10 +408,6 @@ fn check_patterns(hits: &[PatternHit], findings: &mut Vec<Finding>) {
         });
     }
 }
-
-// ──────────────────────────────────────────────
-// Tests
-// ──────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -448,8 +431,6 @@ mod tests {
         }
     }
 
-    // ── Verdict scoring ──
-
     #[test]
     fn verdict_thresholds() {
         assert_eq!(TriageResult::verdict_from_score(0), "CLEAN");
@@ -462,8 +443,6 @@ mod tests {
         assert_eq!(TriageResult::verdict_from_score(50), "HIGH RISK");
         assert_eq!(TriageResult::verdict_from_score(51), "CRITICAL");
     }
-
-    // ── Import combo rules ──
 
     #[test]
     fn loadlibraryw_alone_does_not_trigger_dynamic_resolution() {
@@ -506,8 +485,6 @@ mod tests {
         assert!(findings.iter().any(|f| f.rule == "PROCESS_INJECTION_COMBO"));
     }
 
-    // ── Section rules ──
-
     #[test]
     fn rwx_section_detected() {
         let sections = vec![make_section(".text", 0xE000_0000)]; // R+W+X
@@ -540,8 +517,6 @@ mod tests {
         check_suspicious_section_names(&sections, &mut findings);
         assert!(findings.is_empty());
     }
-
-    // ── Mitigation rules ──
 
     #[test]
     fn no_aslr_detected() {

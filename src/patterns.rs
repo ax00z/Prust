@@ -1,22 +1,9 @@
-// patterns.rs — Fixed-byte pattern scanning with wildcards.
-//
-// A pattern is a sequence of bytes where each position is either a
-// literal value or a wildcard (?? matches any byte). Patterns are
-// written as hex, whitespace-separated:
-//
-//     "E8 00 00 00 00 5B"          — call-pop shellcode prologue
-//     "60 BE ?? ?? ?? ?? 8D BE"    — UPX entry stub
-//
-// Scan uses naive windowed match. For the data sizes we handle
-// (≤256 MB, dozens of patterns), this is fast enough.
+// Hex byte-pattern scanner with `??` wildcards.
 
 const MAX_PATTERN_LEN: usize = 256;
-
-/// Per-pattern match cap. Prevents a pattern that accidentally matches
-/// every byte from ballooning output.
 const MAX_HITS_PER_PATTERN: usize = 32;
 
-/// `None` = wildcard (?? in the source), `Some(b)` = literal byte.
+/// `None` = `??` wildcard, `Some(b)` = literal byte.
 pub type PatternByte = Option<u8>;
 
 #[derive(Debug, Clone)]
@@ -35,8 +22,6 @@ pub struct PatternHit {
     pub offset: usize,
 }
 
-/// Parse "E8 ?? ?? ?? ??" into a `Vec<PatternByte>`.
-/// Returns `None` if any token is neither `??` nor a valid 2-digit hex byte.
 pub fn parse_pattern(src: &str) -> Option<Vec<PatternByte>> {
     let mut out = Vec::new();
     for tok in src.split_ascii_whitespace() {
@@ -56,16 +41,14 @@ pub fn parse_pattern(src: &str) -> Option<Vec<PatternByte>> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Match `pattern` against `window`. `window.len()` must equal `pattern.len()`.
 #[inline]
 fn window_matches(pattern: &[PatternByte], window: &[u8]) -> bool {
     pattern.iter().zip(window.iter()).all(|(p, &b)| match p {
         Some(expected) => *expected == b,
-        None => true, // wildcard
+        None => true,
     })
 }
 
-/// Naive scan: slide `pattern` across `data`, record match offsets.
 pub fn scan(data: &[u8], pattern: &[PatternByte]) -> Vec<usize> {
     if pattern.is_empty() || pattern.len() > data.len() {
         return Vec::new();
@@ -83,13 +66,12 @@ pub fn scan(data: &[u8], pattern: &[PatternByte]) -> Vec<usize> {
     hits
 }
 
-/// Built-in pattern database. Expand over time.
 pub fn builtin_patterns() -> Vec<Pattern> {
     let sources: &[(&'static str, u32, &'static str, &'static str)] = &[
         (
             "SHELLCODE_CALL_POP",
             6,
-            "Call-pop prologue — common shellcode technique for PIC",
+            "Call-pop prologue - common shellcode technique for PIC",
             "E8 00 00 00 00 5B",
         ),
         (
@@ -107,13 +89,13 @@ pub fn builtin_patterns() -> Vec<Pattern> {
         (
             "PEB_FS30_ACCESS",
             5,
-            "mov eax, fs:[30h] — manual PEB walk for dynamic API resolution",
+            "mov eax, fs:[30h] - manual PEB walk for dynamic API resolution",
             "64 A1 30 00 00 00",
         ),
         (
             "PEB_GS60_ACCESS",
             5,
-            "mov rax, gs:[60h] — x64 PEB walk",
+            "mov rax, gs:[60h] - x64 PEB walk",
             "65 48 8B 04 25 60 00 00 00",
         ),
         (
@@ -137,9 +119,7 @@ pub fn builtin_patterns() -> Vec<Pattern> {
         .collect()
 }
 
-/// Scan `data` against every pattern and return hits in file order.
-/// The first match for each pattern is enough for triage; a pattern
-/// matching 100 times is noise.
+/// First hit per pattern, sorted by offset.
 pub fn scan_all(data: &[u8], patterns: &[Pattern]) -> Vec<PatternHit> {
     let mut hits = Vec::new();
     for pat in patterns {
@@ -157,9 +137,7 @@ pub fn scan_all(data: &[u8], patterns: &[Pattern]) -> Vec<PatternHit> {
     hits
 }
 
-/// Skip the PE header region when scanning patterns that would otherwise
-/// false-positive on the loader's own MZ/PE markers. The offset is the
-/// start of the first section's raw data.
+/// First section's raw-data offset; used to skip header MZ/PE false positives.
 pub fn first_section_offset(sections: &[crate::pe::SectionHeader]) -> usize {
     sections
         .iter()

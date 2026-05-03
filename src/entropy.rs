@@ -1,23 +1,10 @@
-// entropy.rs — Shannon entropy calculation
-//
-// Shannon entropy formula:
-//   H = -Σ p(x) * log2(p(x))
-// where p(x) is the probability of byte value x occurring in the data.
-//
-// Result range: 0.0 (all identical bytes) to 8.0 (perfectly random).
-// Thresholds:
-//   < 1.0  — very low, likely sparse/padded data
-//   4.0-6.0 — normal code or structured data
-//   6.5-7.0 — compressed or obfuscated
-//   > 7.0  — encrypted or packed (suspicious for code sections)
+// Shannon entropy in bits/byte (0.0 to 8.0).
 
-/// Compute Shannon entropy of a byte slice. Returns bits per byte (0.0 to 8.0).
 pub fn shannon_entropy(data: &[u8]) -> f64 {
     if data.is_empty() {
         return 0.0;
     }
 
-    // Count occurrences of each byte value (0-255)
     let mut counts = [0u64; 256];
     for &byte in data {
         counts[byte as usize] += 1;
@@ -37,7 +24,6 @@ pub fn shannon_entropy(data: &[u8]) -> f64 {
     entropy
 }
 
-/// Classify an entropy value into a human-readable label.
 pub fn entropy_label(entropy: f64) -> &'static str {
     if entropy < 1.0 {
         "very low (sparse/padded)"

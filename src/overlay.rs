@@ -1,8 +1,4 @@
-// overlay.rs — Detect data appended after the last PE section.
-//
-// The PE loader ignores bytes past the end of the last section's raw data.
-// Packers, droppers, and installers stash payloads there. High-entropy
-// overlays are a strong signal of packed or encrypted data.
+// Detect data appended after the last PE section.
 
 use crate::entropy;
 use crate::pe::SectionHeader;
@@ -15,9 +11,6 @@ pub struct OverlayInfo {
     pub entropy_label: String,
 }
 
-/// Overlay = `file_size - max(section.pointer_to_raw_data + size_of_raw_data)`.
-/// Uses u64 arithmetic and `saturating_add` because section fields are
-/// untrusted u32s and could overflow on crafted input.
 pub fn detect_overlay(data: &[u8], sections: &[SectionHeader]) -> Option<OverlayInfo> {
     if sections.is_empty() {
         return None;
@@ -36,7 +29,6 @@ pub fn detect_overlay(data: &[u8], sections: &[SectionHeader]) -> Option<Overlay
     let overlay_offset = pe_end as usize;
     let overlay_size = data.len() - overlay_offset;
 
-    // Filter out alignment padding and short trailing runs of nulls.
     if overlay_size < 16 {
         return None;
     }

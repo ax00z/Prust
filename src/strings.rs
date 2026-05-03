@@ -1,18 +1,6 @@
-// strings.rs — Extract ASCII and UTF-16LE strings.
-//
-// Windows stores most user-facing strings as UTF-16LE (each character is
-// 2 bytes, low byte first). Registry keys, file paths, API names, and
-// resource strings use this encoding. ASCII catches Linux-origin tools,
-// debug output, and C string literals.
-//
-// Strings reveal C2 domains, paths, registry keys, shell commands, and
-// debug artifacts that a packer typically doesn't hide.
+// ASCII and UTF-16LE string extraction.
 
-/// Below this length, random byte runs produce too many false positives.
 const MIN_STRING_LENGTH: usize = 4;
-
-/// Upper bound per encoding. Prevents output flood on resource-heavy
-/// binaries (installers, .NET assemblies).
 const MAX_STRINGS: usize = 2048;
 
 #[derive(Debug, Clone)]
@@ -42,8 +30,6 @@ fn is_printable_ascii(b: u8) -> bool {
     matches!(b, 0x20..=0x7E | 0x09 | 0x0A)
 }
 
-/// Walk the buffer, accumulating runs of printable bytes. Flush a run
-/// when it ends or on EOF if it meets `MIN_STRING_LENGTH`.
 pub fn extract_ascii(data: &[u8]) -> Vec<ExtractedString> {
     let mut results = Vec::new();
     let mut start: Option<usize> = None;
@@ -68,7 +54,6 @@ pub fn extract_ascii(data: &[u8]) -> Vec<ExtractedString> {
         }
     }
 
-    // Flush a run that extends to EOF.
     if let Some(s) = start
         && data.len() - s >= MIN_STRING_LENGTH
     {
@@ -82,10 +67,7 @@ pub fn extract_ascii(data: &[u8]) -> Vec<ExtractedString> {
     results
 }
 
-/// UTF-16LE extraction restricted to the ASCII subset: high byte == 0x00
-/// and low byte printable. This is simpler than full UTF-16 (no surrogate
-/// pair handling) and sufficient for the strings that matter in triage
-/// (URLs, paths, commands are all ASCII).
+/// ASCII subset of UTF-16LE only (no surrogate pair handling).
 pub fn extract_utf16le(data: &[u8]) -> Vec<ExtractedString> {
     let mut results = Vec::new();
     let mut current_chars: Vec<char> = Vec::new();
@@ -131,7 +113,6 @@ pub fn extract_utf16le(data: &[u8]) -> Vec<ExtractedString> {
     results
 }
 
-/// Merge both encodings and sort by file offset so output reads linearly.
 pub fn extract_all(data: &[u8]) -> Vec<ExtractedString> {
     let mut all = extract_ascii(data);
     all.extend(extract_utf16le(data));

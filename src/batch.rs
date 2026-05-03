@@ -1,24 +1,17 @@
-// batch.rs — Recursive directory scan with per-file triage.
-//
-// Analyzes every PE file under a directory and prints a ranked summary.
-// Per-file errors are captured, not propagated — one corrupt file must
-// not abort a 10,000-sample scan. PE detection uses DOS magic, not file
-// extension, because malware is routinely renamed.
+// Recursive directory scan; PE detection by DOS magic, not extension.
 
+use crate::hashes;
+use crate::loldrivers::LolDriversDb;
 use crate::patterns;
 use crate::pe;
 use crate::rules;
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 const DOS_MAGIC: [u8; 2] = [0x4D, 0x5A];
-
-/// Recursion depth cap. Protects against symlink cycles and
-/// adversarially deep trees.
 const MAX_DEPTH: usize = 16;
-
-/// Total file cap. Protects against pointing Prust at C:\ by accident.
 const MAX_FILES: usize = 10_000;
 
 #[derive(Debug)]
@@ -36,13 +29,39 @@ pub enum BatchResult {
     ParseError(String),
 }
 
-pub fn scan_directory(dir: &Path) -> Vec<BatchEntry> {
+#[derive(Debug, Serialize)]
+pub struct BatchReport {
+    pub scanned: usize,
+    pub pe_files_analyzed: usize,
+    pub errors: usize,
+    pub entries: Vec<BatchReportEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchReportEntry {
+    pub path: String,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_finding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage: Option<rules::TriageResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub fn scan_directory(dir: &Path, lol_db: Option<&LolDriversDb>) -> Vec<BatchEntry> {
     let mut entries = Vec::new();
-    walk(dir, 0, &mut entries);
+    walk(dir, 0, lol_db, &mut entries);
     entries
 }
 
-fn walk(dir: &Path, depth: usize, entries: &mut Vec<BatchEntry>) {
+fn walk(dir: &Path, depth: usize, lol_db: Option<&LolDriversDb>, entries: &mut Vec<BatchEntry>) {
     if depth >= MAX_DEPTH || entries.len() >= MAX_FILES {
         return;
     }
@@ -58,23 +77,20 @@ fn walk(dir: &Path, depth: usize, entries: &mut Vec<BatchEntry>) {
 
         let path = entry.path();
 
-        // `file_type()` does not follow symlinks — prevents cycles.
+        // `file_type()` does not follow symlinks.
         let Ok(ft) = entry.file_type() else { continue };
 
         if ft.is_dir() {
-            walk(&path, depth + 1, entries);
+            walk(&path, depth + 1, lol_db, entries);
         } else if ft.is_file()
-            && let Some(result) = analyze_one(&path)
+            && let Some(result) = analyze_one(&path, lol_db)
         {
             entries.push(BatchEntry { path, result });
         }
     }
 }
 
-/// Returns `None` for obvious non-PE files so they don't clutter the
-/// report. Returns `Some(...)` for anything starting with MZ, even if
-/// it later fails to parse.
-fn analyze_one(path: &Path) -> Option<BatchResult> {
+fn analyze_one(path: &Path, lol_db: Option<&LolDriversDb>) -> Option<BatchResult> {
     let meta = match fs::metadata(path) {
         Ok(m) => m,
         Err(e) => return Some(BatchResult::IoError(e.to_string())),
@@ -103,11 +119,9 @@ fn analyze_one(path: &Path) -> Option<BatchResult> {
         return None;
     }
 
-    Some(run_triage(&data))
+    Some(run_triage(&data, lol_db))
 }
 
-/// Read only the first two bytes of a file to check DOS magic without
-/// loading the whole file.
 fn check_magic_only(path: &Path) -> Option<bool> {
     use std::io::Read;
     let mut file = fs::File::open(path).ok()?;
@@ -116,7 +130,7 @@ fn check_magic_only(path: &Path) -> Option<bool> {
     Some(buf == DOS_MAGIC)
 }
 
-fn run_triage(data: &[u8]) -> BatchResult {
+fn run_triage(data: &[u8], lol_db: Option<&LolDriversDb>) -> BatchResult {
     let dos = match pe::DosHeader::parse(data) {
         Ok(d) => d,
         Err(e) => return BatchResult::ParseError(e.to_string()),
@@ -173,6 +187,17 @@ fn run_triage(data: &[u8]) -> BatchResult {
         })
         .collect();
 
+    // Skip hashing entirely when no DB is loaded.
+    let loldrivers_match = lol_db.and_then(|db| {
+        let mut file_hashes = hashes::compute(data, &imports);
+        file_hashes.authentihash = hashes::authentihash_sha256(data, &opt, &sections, pe_offset);
+        db.lookup(
+            &file_hashes.sha256,
+            file_hashes.authentihash.as_deref(),
+            file_hashes.imphash.as_deref(),
+        )
+    });
+
     let triage = rules::analyze(
         &coff,
         &opt,
@@ -182,12 +207,13 @@ fn run_triage(data: &[u8]) -> BatchResult {
         tls.as_ref(),
         overlay_info.as_ref(),
         &pattern_hits,
+        loldrivers_match.as_ref(),
     );
     BatchResult::Ok(triage)
 }
 
-/// Sort descending by score (worst first) and print a fixed-width table.
-pub fn print_summary(entries: &mut [BatchEntry]) {
+/// Sort descending by score (worst first).
+pub fn sort_by_risk(entries: &mut [BatchEntry]) {
     entries.sort_by(|a, b| {
         let score_a = match &a.result {
             BatchResult::Ok(t) => t.score,
@@ -199,6 +225,84 @@ pub fn print_summary(entries: &mut [BatchEntry]) {
         };
         score_b.cmp(&score_a)
     });
+}
+
+pub fn to_report(entries: &[BatchEntry]) -> BatchReport {
+    let pe_files_analyzed = entries
+        .iter()
+        .filter(|e| matches!(e.result, BatchResult::Ok(_)))
+        .count();
+    let errors = entries.len() - pe_files_analyzed;
+
+    let entries = entries
+        .iter()
+        .map(|entry| {
+            let path = entry.path.display().to_string();
+            match &entry.result {
+                BatchResult::Ok(t) => BatchReportEntry {
+                    path,
+                    status: "ok",
+                    score: Some(t.score),
+                    verdict: Some(t.verdict),
+                    top_finding: t.findings.first().map(|f| f.rule.to_string()),
+                    triage: Some(t.clone()),
+                    size: None,
+                    error: None,
+                },
+                BatchResult::NotPe => BatchReportEntry {
+                    path,
+                    status: "not_pe",
+                    score: None,
+                    verdict: None,
+                    top_finding: None,
+                    triage: None,
+                    size: None,
+                    error: None,
+                },
+                BatchResult::TooLarge(size) => BatchReportEntry {
+                    path,
+                    status: "too_large",
+                    score: None,
+                    verdict: None,
+                    top_finding: None,
+                    triage: None,
+                    size: Some(*size),
+                    error: None,
+                },
+                BatchResult::IoError(msg) => BatchReportEntry {
+                    path,
+                    status: "io_error",
+                    score: None,
+                    verdict: None,
+                    top_finding: None,
+                    triage: None,
+                    size: None,
+                    error: Some(msg.clone()),
+                },
+                BatchResult::ParseError(msg) => BatchReportEntry {
+                    path,
+                    status: "parse_error",
+                    score: None,
+                    verdict: None,
+                    top_finding: None,
+                    triage: None,
+                    size: None,
+                    error: Some(msg.clone()),
+                },
+            }
+        })
+        .collect();
+
+    BatchReport {
+        scanned: pe_files_analyzed + errors,
+        pe_files_analyzed,
+        errors,
+        entries,
+    }
+}
+
+pub fn print_summary(entries: &mut [BatchEntry]) {
+    sort_by_risk(entries);
 
     let pe_count = entries
         .iter()
@@ -232,7 +336,7 @@ pub fn print_summary(entries: &mut [BatchEntry]) {
 
         match &entry.result {
             BatchResult::Ok(t) => {
-                let top = t.findings.first().map_or("—".to_string(), |f| {
+                let top = t.findings.first().map_or("-".to_string(), |f| {
                     if f.rule.len() > 38 {
                         f.rule[..38].to_string()
                     } else {
@@ -282,8 +386,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// MZ prefix with e_lfanew pointing past EOF — passes magic check,
-    /// fails full parse. Used to verify error capture.
+    /// MZ prefix with e_lfanew past EOF: passes magic, fails full parse.
     fn make_mz_but_invalid_pe() -> Vec<u8> {
         let mut data = vec![0u8; 64];
         data[0] = 0x4D;
@@ -302,7 +405,7 @@ mod tests {
         let mut f = fs::File::create(tmp.join("readme.txt")).unwrap();
         f.write_all(b"hello world this is not a PE file").unwrap();
 
-        let entries = scan_directory(&tmp);
+        let entries = scan_directory(&tmp, None);
         assert!(entries.is_empty());
 
         fs::remove_dir_all(&tmp).unwrap();
@@ -317,7 +420,7 @@ mod tests {
         let mut f = fs::File::create(tmp.join("fake.exe")).unwrap();
         f.write_all(&make_mz_but_invalid_pe()).unwrap();
 
-        let entries = scan_directory(&tmp);
+        let entries = scan_directory(&tmp, None);
         assert_eq!(entries.len(), 1);
         assert!(matches!(entries[0].result, BatchResult::ParseError(_)));
 
@@ -334,7 +437,7 @@ mod tests {
         let mut f = fs::File::create(sub.join("payload.exe")).unwrap();
         f.write_all(&make_mz_but_invalid_pe()).unwrap();
 
-        let entries = scan_directory(&tmp);
+        let entries = scan_directory(&tmp, None);
         assert_eq!(entries.len(), 1);
 
         fs::remove_dir_all(&tmp).unwrap();
@@ -346,7 +449,7 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
 
-        let entries = scan_directory(&tmp);
+        let entries = scan_directory(&tmp, None);
         assert!(entries.is_empty());
 
         fs::remove_dir_all(&tmp).unwrap();
@@ -355,7 +458,23 @@ mod tests {
     #[test]
     fn walk_handles_nonexistent_directory() {
         let path = PathBuf::from("definitely_does_not_exist_prust_xyz_12345");
-        let entries = scan_directory(&path);
+        let entries = scan_directory(&path, None);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn report_projects_parse_errors() {
+        let entries = vec![BatchEntry {
+            path: PathBuf::from("bad.exe"),
+            result: BatchResult::ParseError("bad PE signature".to_string()),
+        }];
+
+        let report = to_report(&entries);
+
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.pe_files_analyzed, 0);
+        assert_eq!(report.errors, 1);
+        assert_eq!(report.entries[0].status, "parse_error");
+        assert_eq!(report.entries[0].error.as_deref(), Some("bad PE signature"));
     }
 }
