@@ -33,7 +33,7 @@ fn parse_imports_best_effort(data: &[u8]) -> Vec<pe::ImportEntry> {
         return vec![];
     };
     let opt_offset = pe_offset + 24;
-    let Ok(opt) = pe::OptionalHeader::parse(data, opt_offset) else {
+    let Ok(opt) = pe::OptionalHeader::parse(data, opt_offset, coff.size_of_optional_header) else {
         return vec![];
     };
     let sec_offset = pe::section_table_offset(pe_offset, coff.size_of_optional_header);
@@ -56,9 +56,10 @@ fn parse_optional_header(data: &[u8]) -> Result<pe::OptionalHeader, String> {
     let pe_offset = dos.e_lfanew as usize;
     // Parsing the COFF header validates the PE signature and magic; we
     // don't need its fields here — OptionalHeader sits at a fixed offset.
-    let _coff = pe::CoffHeader::parse(data, pe_offset).map_err(|e| e.to_string())?;
+    let coff = pe::CoffHeader::parse(data, pe_offset).map_err(|e| e.to_string())?;
     let opt_offset = pe_offset + 24;
-    pe::OptionalHeader::parse(data, opt_offset).map_err(|e| e.to_string())
+    pe::OptionalHeader::parse(data, opt_offset, coff.size_of_optional_header)
+        .map_err(|e| e.to_string())
 }
 
 /// Compute MD5, SHA256, and imphash of a PE file.

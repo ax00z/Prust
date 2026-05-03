@@ -395,14 +395,31 @@ pub struct OptionalHeader {
 impl OptionalHeader {
     /// Parse from file data. `offset` is the first byte of the optional header
     /// (immediately after the COFF header).
-    pub fn parse(data: &[u8], offset: usize) -> Result<Self, ParseError> {
-        // We need at least 2 bytes to read the magic and determine the format.
-        if data.len() < offset + 2 {
-            return Err(ParseError::too_small(
-                offset + 2,
+    pub fn parse(
+        data: &[u8],
+        offset: usize,
+        size_of_optional_header: u16,
+    ) -> Result<Self, ParseError> {
+        let declared_size = size_of_optional_header as usize;
+        let Some(declared_end) = offset.checked_add(declared_size) else {
+            return Err(ParseError::malformed(format!(
+                "optional header offset+size overflows: 0x{offset:X} + {declared_size}"
+            )));
+        };
+        if declared_end > data.len() {
+            return Err(ParseError::truncated(
+                offset,
+                declared_size,
                 data.len(),
-                "optional header magic",
+                "optional header",
             ));
+        }
+
+        // We need at least 2 bytes to read the magic and determine the format.
+        if declared_size < 2 {
+            return Err(ParseError::malformed(format!(
+                "SizeOfOptionalHeader ({declared_size}) is too small to contain optional header magic"
+            )));
         }
 
         let magic = read_u16_at(data, offset, "OptionalHeader.Magic")?;
@@ -420,12 +437,11 @@ impl OptionalHeader {
         // Minimum size for the fixed portion of the optional header
         // (before data directories): PE32 = 96 bytes, PE32+ = 112 bytes.
         let fixed_size = if is_pe32_plus { 112 } else { 96 };
-        if data.len() < offset + fixed_size {
-            return Err(ParseError::too_small(
-                offset + fixed_size,
-                data.len(),
-                "optional header fixed fields",
-            ));
+        if declared_size < fixed_size {
+            return Err(ParseError::malformed(format!(
+                "SizeOfOptionalHeader ({declared_size}) is smaller than PE{} fixed header ({fixed_size})",
+                if is_pe32_plus { "32+" } else { "32" }
+            )));
         }
 
         let major_linker_version = data[offset + 2];
@@ -460,8 +476,20 @@ impl OptionalHeader {
         let number_of_rva_and_sizes = read_u32_at(data, offset + nrva, "NumberOfRvaAndSizes")?;
 
         // Sanity-check: the PE spec defines at most 16 data directory entries.
-        // Accept up to 16 but don't trust values larger than that.
-        let num_dirs = (number_of_rva_and_sizes as usize).min(16);
+        // Also require the declared directory count to fit inside
+        // SizeOfOptionalHeader; otherwise a malformed header could bleed into
+        // the section table and make those bytes look like data directories.
+        let declared_dirs = (number_of_rva_and_sizes as usize).min(16);
+        let dir_bytes_offset = nrva + 4;
+        let available_dirs =
+            declared_size.saturating_sub(dir_bytes_offset) / DATA_DIRECTORY_ENTRY_SIZE;
+        if declared_dirs > available_dirs {
+            return Err(ParseError::malformed(format!(
+                "NumberOfRvaAndSizes ({number_of_rva_and_sizes}) declares {declared_dirs} data directories, but SizeOfOptionalHeader only has room for {available_dirs}"
+            )));
+        }
+
+        let num_dirs = declared_dirs;
         let dd_offset = offset + nrva + 4;
         let mut data_directories = Vec::with_capacity(num_dirs);
 
@@ -997,6 +1025,31 @@ mod tests {
         data[0x86] = 0xFF;
         data[0x87] = 0xFF;
         let result = CoffHeader::parse(&data, 0x80);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind, ParseErrorKind::MalformedField);
+    }
+
+    #[test]
+    fn reject_optional_header_smaller_than_fixed_fields() {
+        let mut data = [0u8; 256];
+        let offset = 0x40;
+        data[offset..offset + 2].copy_from_slice(&PE32PLUS_MAGIC.to_le_bytes());
+
+        let result = OptionalHeader::parse(&data, offset, 108);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind, ParseErrorKind::MalformedField);
+    }
+
+    #[test]
+    fn reject_data_directories_past_optional_header_boundary() {
+        let mut data = [0u8; 256];
+        let offset = 0x40;
+        data[offset..offset + 2].copy_from_slice(&PE32PLUS_MAGIC.to_le_bytes());
+        data[offset + 108..offset + 112].copy_from_slice(&1u32.to_le_bytes());
+
+        let result = OptionalHeader::parse(&data, offset, 112);
+
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind, ParseErrorKind::MalformedField);
     }

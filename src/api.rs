@@ -218,7 +218,7 @@ pub fn analyze_bytes(data: Vec<u8>) -> Result<Analysis, Box<dyn std::error::Erro
     let pe_offset = dos.e_lfanew as usize;
     let coff = pe::CoffHeader::parse(&data, pe_offset)?;
     let opt_offset = pe_offset + 24;
-    let opt = pe::OptionalHeader::parse(&data, opt_offset)?;
+    let opt = pe::OptionalHeader::parse(&data, opt_offset, coff.size_of_optional_header)?;
 
     let sec_offset = pe::section_table_offset(pe_offset, coff.size_of_optional_header);
     let sections = pe::SectionHeader::parse_all(&data, sec_offset, coff.number_of_sections)?;

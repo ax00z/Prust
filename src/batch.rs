@@ -129,7 +129,7 @@ fn run_triage(data: &[u8]) -> BatchResult {
     };
 
     let opt_offset = pe_offset + 24;
-    let opt = match pe::OptionalHeader::parse(data, opt_offset) {
+    let opt = match pe::OptionalHeader::parse(data, opt_offset, coff.size_of_optional_header) {
         Ok(o) => o,
         Err(e) => return BatchResult::ParseError(e.to_string()),
     };
