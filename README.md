@@ -1,21 +1,34 @@
 # Prust
 
-`prust` is a small Rust CLI that parses Windows PE files and prints a quick triage report.
+`prust` is a Rust CLI for static triage of Windows PE files such as `.exe`,
+`.dll`, and `.sys` samples.
 
 ## What it does
 
 - Reads the DOS, COFF, and optional headers
-- Lists sections with permissions and entropy
-- Parses imports and exports
-- Scores suspicious traits such as RWX sections, packer-like names, and missing mitigations
-- Supports plain text output or JSON output
+- Lists sections with raw offsets, permissions, characteristics, and entropy
+- Parses imports, exports, TLS callbacks, data directories, and overlay data
+- Computes MD5, SHA256, imphash, and Authenticode authentihash
+- Checks Authenticode certificate table presence and basic PKCS#7 shape
+- Matches SHA256, authentihash, and imphash values against a LOLDrivers corpus
+- Scores suspicious traits such as RWX sections, packer-like names, suspicious imports,
+  embedded PE patterns, TLS callbacks, overlays, and missing mitigations
+- Supports text output, JSON output, and recursive directory scans
 
 ## Project layout
 
-- `src/main.rs` wires the CLI together
+- `src/main.rs` defines the CLI entry point
+- `src/api.rs` contains the shared analysis pipeline and JSON report shape
 - `src/pe.rs` contains the PE parser
-- `src/entropy.rs` calculates Shannon entropy for section data
+- `src/hashes.rs` computes file hashes, imphash, and authentihash
+- `src/authenticode.rs` inspects the PE security directory
+- `src/loldrivers.rs` loads and searches the LOLDrivers corpus
+- `src/batch.rs` implements recursive directory scans
+- `src/entropy.rs` calculates Shannon entropy for section and overlay data
+- `src/patterns.rs` scans suspicious byte signatures
+- `src/strings.rs` extracts ASCII and UTF-16LE strings
 - `src/rules.rs` applies the triage rules and scoring
+- `tests/cli.rs` tests the `prust` binary end to end
 
 ## Run it
 
@@ -35,6 +48,9 @@ Useful flags:
 
 - `--json` for machine-readable output
 - `--triage-only` to skip the full header dump
+- `--no-loldrivers` to skip LOLDrivers lookup
+- `--loldrivers <path>` to use a specific LOLDrivers JSON file
+- `--update` to refresh the cached LOLDrivers corpus
 
 Example:
 
@@ -42,15 +58,23 @@ Example:
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" run -- .\sample.exe --triage-only
 ```
 
+Directory scan:
+
+```powershell
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" run -- .\samples --json
+```
+
 ## Dev workflow
 
 ```powershell
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" fmt --check
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" check
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" test
 ```
 
-## Next good steps
+## Roadmap
 
-- Add parser tests with small hand-built byte fixtures
-- Add a sample PE to exercise the CLI end-to-end
-- Split reporting from parsing so the JSON and text output paths share less formatting logic
+- Add delay-import, resource, load-config, debug-directory, and relocation parsing
+- Add richer Authenticode signer/certificate metadata instead of only certificate-table shape
+- Add rule metadata suitable for stable machine consumption, such as categories and tags
+- Decide whether to rename the Cargo package/library from `sigkill` to `prust`

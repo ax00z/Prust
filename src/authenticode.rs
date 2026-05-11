@@ -1,4 +1,4 @@
-// WIN_CERTIFICATE unwrap + PKCS#7 ContentInfo decode.
+// WIN_CERTIFICATE and PKCS#7 ContentInfo parsing.
 //
 // DIR_SECURITY.virtual_address is a file offset, not an RVA. WIN_CERTIFICATE
 // header is 8 bytes (dwLength, wRevision, wCertificateType) followed by the
@@ -75,7 +75,7 @@ pub fn analyze(data: &[u8], opt: &OptionalHeader) -> SignatureStatus {
         ));
     }
 
-    // dwLength is rounded up to 8 bytes; trim trailing padding via the DER length prefix.
+    // dwLength is padded to 8 bytes. The DER length marks the signed blob.
     let padded_blob = &data[offset + WIN_CERT_HEADER_SIZE..offset + dw_length];
     let der_len = match der_tlv_total_length(padded_blob) {
         Some(n) if n <= padded_blob.len() => n,

@@ -74,7 +74,6 @@ pub fn analyze(
     }
 }
 
-/// SHA256/authentihash matches force CRITICAL verdict on otherwise-clean binaries.
 fn check_known_vulnerable_driver(db_match: Option<&DriverMatch>, findings: &mut Vec<Finding>) {
     let Some(m) = db_match else { return };
     let severity = match m.kind {

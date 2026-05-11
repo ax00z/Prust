@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "prust"
 version = "0.1.0"
-description = "PE + Authenticode forensics. Rust-powered static analyzer for Windows binaries."
+description = "PE and Authenticode static analyzer for Windows binaries."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT OR Apache-2.0" }
@@ -21,8 +21,5 @@ classifiers = [
 ]
 
 [tool.maturin]
-# Enable the `python` feature in Cargo.toml so src/python.rs is compiled in.
 features = ["python"]
-# The Rust crate builds both an rlib (for the CLI) and a cdylib (for
-# Python); tell maturin which module name to emit for the extension.
 module-name = "prust"

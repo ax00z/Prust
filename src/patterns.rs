@@ -137,7 +137,7 @@ pub fn scan_all(data: &[u8], patterns: &[Pattern]) -> Vec<PatternHit> {
     hits
 }
 
-/// First section's raw-data offset; used to skip header MZ/PE false positives.
+/// First section raw-data offset.
 pub fn first_section_offset(sections: &[crate::pe::SectionHeader]) -> usize {
     sections
         .iter()
@@ -217,11 +217,9 @@ mod tests {
     #[test]
     fn scan_all_finds_embedded_mz() {
         let mut data = vec![0x00; 100];
-        // Embedded MZ with minimal PE link at offset 40
         let mz_start = 50;
         data[mz_start] = 0x4D;
         data[mz_start + 1] = 0x5A;
-        // e_lfanew = 40, PE sig at mz_start + 40 = 90
         data[mz_start + 40] = 0x50;
         data[mz_start + 41] = 0x45;
         let patterns = builtin_patterns();

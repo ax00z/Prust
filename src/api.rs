@@ -1,7 +1,4 @@
-//! Analysis pipeline shared by the CLI and Python bindings.
-//!
-//! [`Analysis`] holds parsed structures plus owned file bytes; [`Report`] is
-//! the serializable projection consumed by `--json` and `pythonize`.
+//! Shared analysis pipeline for the CLI and Python bindings.
 
 use crate::{authenticode, entropy, hashes, loldrivers, overlay, patterns, pe, rules, strings};
 use serde::Serialize;
@@ -23,12 +20,21 @@ pub struct Report {
     pub image_base: String,
     pub characteristics: Vec<String>,
     pub dll_characteristics: Vec<String>,
+    pub coff_header: ReportCoffHeader,
+    pub optional_header: ReportOptionalHeader,
+    pub data_directories: Vec<ReportDataDirectory>,
     pub signature: ReportSignature,
     pub sections: Vec<ReportSection>,
     pub imports: Vec<ReportImport>,
+    pub import_count: usize,
     pub export_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub exports: Option<ReportExports>,
+    pub tls_callback_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_callbacks: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<ReportTls>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<ReportOverlay>,
     pub string_count: usize,
@@ -37,6 +43,48 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loldrivers_match: Option<ReportLolDriversMatch>,
     pub triage: rules::TriageResult,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportCoffHeader {
+    pub machine: String,
+    pub machine_hex: String,
+    pub number_of_sections: u16,
+    pub time_date_stamp: u32,
+    pub pointer_to_symbol_table: u32,
+    pub number_of_symbols: u32,
+    pub size_of_optional_header: u16,
+    pub characteristics: String,
+    pub characteristic_flags: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportOptionalHeader {
+    pub magic: String,
+    pub format: String,
+    pub linker_version: String,
+    pub size_of_code: u32,
+    pub entry_point: String,
+    pub image_base: String,
+    pub section_alignment: u32,
+    pub file_alignment: u32,
+    pub os_version: String,
+    pub size_of_image: u32,
+    pub size_of_headers: u32,
+    pub checksum: String,
+    pub subsystem: String,
+    pub dll_characteristics: String,
+    pub dll_characteristic_flags: Vec<String>,
+    pub number_of_rva_and_sizes: u32,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportDataDirectory {
+    pub index: usize,
+    pub name: String,
+    pub virtual_address: String,
+    pub size: u32,
+    pub present: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -61,7 +109,12 @@ pub struct ReportSection {
     pub virtual_size: u32,
     pub virtual_address: String,
     pub raw_size: u32,
+    pub raw_pointer: String,
+    pub characteristics: String,
     pub permissions: String,
+    pub readable: bool,
+    pub writable: bool,
+    pub executable: bool,
     pub entropy: f64,
     pub entropy_label: String,
 }
@@ -69,12 +122,27 @@ pub struct ReportSection {
 #[derive(Serialize, Debug, Clone)]
 pub struct ReportImport {
     pub dll: String,
+    pub function_count: usize,
     pub functions: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportExports {
+    pub dll: String,
+    pub function_count: usize,
+    pub functions: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportTls {
+    pub callback_count: usize,
+    pub callbacks: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
 pub struct ReportOverlay {
     pub offset: usize,
+    pub offset_hex: String,
     pub size: usize,
     pub entropy: f64,
     pub entropy_label: String,
@@ -130,8 +198,6 @@ impl From<&authenticode::SignatureStatus> for ReportSignature {
     }
 }
 
-/// Owns the file bytes; downstream consumers can re-read sections without
-/// keeping a parallel buffer alive.
 pub struct Analysis {
     pub data: Vec<u8>,
     pub dos: pe::DosHeader,
@@ -208,7 +274,6 @@ pub fn filter_interesting(strings_in: &[strings::ExtractedString]) -> Vec<String
     result
 }
 
-/// Takes ownership of `data`; the returned [`Analysis`] retains it.
 /// `lol_db = None` skips the LOLDrivers lookup.
 pub fn analyze_bytes(
     data: Vec<u8>,
@@ -254,7 +319,7 @@ pub fn analyze_bytes(
 
     let extracted_strings = strings::extract_all(&data);
 
-    // Skip headers to avoid false MZ/PE hits, then re-anchor offsets.
+    // Scan section data only.
     let scan_start = patterns::first_section_offset(&sections).min(data.len());
     let pattern_hits_raw = patterns::scan_all(&data[scan_start..], &patterns::builtin_patterns());
     let pattern_hits: Vec<patterns::PatternHit> = pattern_hits_raw
@@ -311,6 +376,25 @@ pub fn analyze_bytes(
 
 impl Analysis {
     pub fn to_report(&self, path: &str) -> Report {
+        let characteristic_flags: Vec<String> = self
+            .coff
+            .characteristics_list()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let dll_characteristic_flags: Vec<String> = self
+            .opt
+            .dll_characteristics_list()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let tls_callbacks: Option<Vec<String>> = self.tls.as_ref().map(|t| {
+            t.callbacks
+                .iter()
+                .map(|va| format!("0x{va:016X}"))
+                .collect()
+        });
+
         Report {
             file: path.to_string(),
             file_size: self.data.len(),
@@ -328,17 +412,60 @@ impl Analysis {
             subsystem: self.opt.subsystem_name().to_string(),
             entry_point: format!("0x{:08X}", self.opt.address_of_entry_point),
             image_base: format!("0x{:016X}", self.opt.image_base),
-            characteristics: self
-                .coff
-                .characteristics_list()
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            dll_characteristics: self
+            characteristics: characteristic_flags.clone(),
+            dll_characteristics: dll_characteristic_flags.clone(),
+            coff_header: ReportCoffHeader {
+                machine: self.coff.machine_name().to_string(),
+                machine_hex: format!("0x{:04X}", self.coff.machine),
+                number_of_sections: self.coff.number_of_sections,
+                time_date_stamp: self.coff.time_date_stamp,
+                pointer_to_symbol_table: self.coff.pointer_to_symbol_table,
+                number_of_symbols: self.coff.number_of_symbols,
+                size_of_optional_header: self.coff.size_of_optional_header,
+                characteristics: format!("0x{:04X}", self.coff.characteristics),
+                characteristic_flags,
+            },
+            optional_header: ReportOptionalHeader {
+                magic: format!("0x{:04X}", self.opt.magic),
+                format: if self.opt.is_pe32_plus() {
+                    "PE32+"
+                } else {
+                    "PE32"
+                }
+                .to_string(),
+                linker_version: format!(
+                    "{}.{}",
+                    self.opt.major_linker_version, self.opt.minor_linker_version
+                ),
+                size_of_code: self.opt.size_of_code,
+                entry_point: format!("0x{:08X}", self.opt.address_of_entry_point),
+                image_base: format!("0x{:016X}", self.opt.image_base),
+                section_alignment: self.opt.section_alignment,
+                file_alignment: self.opt.file_alignment,
+                os_version: format!(
+                    "{}.{}",
+                    self.opt.major_os_version, self.opt.minor_os_version
+                ),
+                size_of_image: self.opt.size_of_image,
+                size_of_headers: self.opt.size_of_headers,
+                checksum: format!("0x{:08X}", self.opt.checksum),
+                subsystem: self.opt.subsystem_name().to_string(),
+                dll_characteristics: format!("0x{:04X}", self.opt.dll_characteristics),
+                dll_characteristic_flags,
+                number_of_rva_and_sizes: self.opt.number_of_rva_and_sizes,
+            },
+            data_directories: self
                 .opt
-                .dll_characteristics_list()
-                .into_iter()
-                .map(String::from)
+                .data_directories
+                .iter()
+                .enumerate()
+                .map(|(index, d)| ReportDataDirectory {
+                    index,
+                    name: pe::dir_name(index).to_string(),
+                    virtual_address: format!("0x{:08X}", d.virtual_address),
+                    size: d.size,
+                    present: d.virtual_address != 0 || d.size != 0,
+                })
                 .collect(),
             signature: ReportSignature::from(&self.signature),
             sections: self
@@ -351,7 +478,12 @@ impl Analysis {
                         virtual_size: s.virtual_size,
                         virtual_address: format!("0x{:08X}", s.virtual_address),
                         raw_size: s.size_of_raw_data,
+                        raw_pointer: format!("0x{:08X}", s.pointer_to_raw_data),
+                        characteristics: format!("0x{:08X}", s.characteristics),
                         permissions: s.permissions_string(),
+                        readable: s.is_readable(),
+                        writable: s.is_writable(),
+                        executable: s.is_executable(),
                         entropy: (ent * 10000.0).round() / 10000.0,
                         entropy_label: entropy::entropy_label(ent).to_string(),
                     }
@@ -362,18 +494,26 @@ impl Analysis {
                 .iter()
                 .map(|i| ReportImport {
                     dll: i.dll_name.clone(),
+                    function_count: i.functions.len(),
                     functions: i.functions.clone(),
                 })
                 .collect(),
+            import_count: self.imports.len(),
             export_count: self.exports.as_ref().map_or(0, |e| e.functions.len()),
-            tls_callbacks: self.tls.as_ref().map(|t| {
-                t.callbacks
-                    .iter()
-                    .map(|va| format!("0x{va:016X}"))
-                    .collect()
+            exports: self.exports.as_ref().map(|e| ReportExports {
+                dll: e.dll_name.clone(),
+                function_count: e.functions.len(),
+                functions: e.functions.clone(),
+            }),
+            tls_callback_count: self.tls.as_ref().map_or(0, |t| t.callbacks.len()),
+            tls_callbacks: tls_callbacks.clone(),
+            tls: tls_callbacks.map(|callbacks| ReportTls {
+                callback_count: callbacks.len(),
+                callbacks,
             }),
             overlay: self.overlay.as_ref().map(|o| ReportOverlay {
                 offset: o.offset,
+                offset_hex: format!("0x{:08X}", o.offset),
                 size: o.size,
                 entropy: o.entropy,
                 entropy_label: o.entropy_label.clone(),

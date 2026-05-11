@@ -14,7 +14,7 @@ const SECTION_HEADER_SIZE: usize = 40;
 const DATA_DIRECTORY_ENTRY_SIZE: usize = 8;
 const E_LFANEW_OFFSET: usize = 0x3C;
 
-// Bounds against malformed-header DoS.
+// Parser limits for malformed inputs.
 const MAX_SECTIONS: u16 = 96;
 const MAX_IMPORT_DLLS: usize = 4096;
 const MAX_THUNK_ENTRIES: usize = 65536;
@@ -409,8 +409,7 @@ impl OptionalHeader {
         let dll_characteristics = read_u16_at(data, offset + dc, "DllCharacteristics")?;
         let number_of_rva_and_sizes = read_u32_at(data, offset + nrva, "NumberOfRvaAndSizes")?;
 
-        // Cap at 16 (spec max) and ensure they fit in SizeOfOptionalHeader so a
-        // bogus count can't bleed into the section table.
+        // Data directories must fit inside SizeOfOptionalHeader.
         let declared_dirs = (number_of_rva_and_sizes as usize).min(16);
         let dir_bytes_offset = nrva + 4;
         let available_dirs =
@@ -551,7 +550,6 @@ impl SectionHeader {
         for i in 0..count {
             let off = offset + i * SECTION_HEADER_SIZE;
 
-            // 8-byte null-padded ASCII name.
             let name_bytes = &data[off..off + 8];
             let name = String::from_utf8_lossy(name_bytes)
                 .trim_end_matches('\0')
@@ -658,7 +656,7 @@ pub fn parse_imports(
             None => format!("<invalid RVA 0x{name_rva:08X}>"),
         };
 
-        // Prefer INT (OriginalFirstThunk); the IAT (FirstThunk) may be loader-overwritten.
+        // Prefer INT because the loader may update the IAT.
         let thunk_rva = if original_first_thunk != 0 {
             original_first_thunk
         } else {
@@ -859,7 +857,6 @@ mod tests {
         let mut data = [0u8; 64];
         data[0] = 0x4D; // M
         data[1] = 0x5A; // Z
-        // Set e_lfanew to point way past the file
         data[0x3C] = 0xFF;
         data[0x3D] = 0xFF;
         data[0x3E] = 0x00;
@@ -874,8 +871,7 @@ mod tests {
         let mut data = [0u8; 256];
         data[0] = 0x4D;
         data[1] = 0x5A;
-        data[0x3C] = 0x80; // e_lfanew = 0x80
-        // Need PE sig + COFF header at offset 0x80 = 128, so file must be >= 152
+        data[0x3C] = 0x80;
         let dos = DosHeader::parse(&data).unwrap();
         assert_eq!(dos.e_magic, 0x5A4D);
         assert_eq!(dos.e_lfanew, 0x80);
@@ -883,15 +879,12 @@ mod tests {
 
     #[test]
     fn reject_excessive_section_count() {
-        // Build a minimal valid PE up to the COFF header with 0xFFFF sections
         let mut data = [0u8; 256];
         data[0] = 0x4D;
-        data[1] = 0x5A; // MZ
-        data[0x3C] = 0x80; // e_lfanew
-        // PE signature at 0x80
+        data[1] = 0x5A;
+        data[0x3C] = 0x80;
         data[0x80] = 0x50;
-        data[0x81] = 0x45; // "PE\0\0"
-        // NumberOfSections at 0x86 = 0xFFFF
+        data[0x81] = 0x45;
         data[0x86] = 0xFF;
         data[0x87] = 0xFF;
         let result = CoffHeader::parse(&data, 0x80);
@@ -926,7 +919,6 @@ mod tests {
 
     #[test]
     fn ascii_string_respects_max_length() {
-        // No null terminator in sight - should still stop.
         let data = vec![0x41u8; MAX_ASCII_STRING_LEN + 100];
         let s = read_ascii_string(&data, 0);
         assert_eq!(s.len(), MAX_ASCII_STRING_LEN);
@@ -948,9 +940,7 @@ mod tests {
             pointer_to_raw_data: 0x400,
             characteristics: 0,
         }];
-        // RVA 0x1010 should map to file offset 0x410
         assert_eq!(rva_to_offset(0x1010, &sections), Some(0x410));
-        // RVA 0x3000 is outside all sections
         assert_eq!(rva_to_offset(0x3000, &sections), None);
     }
 

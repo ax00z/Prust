@@ -68,7 +68,6 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .as_deref()
         .ok_or("missing FILE argument (or pass --update to refresh the LOLDrivers cache)")?;
 
-    // Resolution: --no-loldrivers > --loldrivers <path> > cached > none.
     let lol_db = if cli.no_loldrivers {
         None
     } else if let Some(p) = &cli.loldrivers {
@@ -81,7 +80,6 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Directory mode runs before the size check (directories have no len()).
     let meta_check = fs::metadata(path).map_err(|e| format!("cannot stat {path}: {e}"))?;
     if meta_check.is_dir() {
         let mut entries = batch::scan_directory(Path::new(path), lol_db.as_ref());

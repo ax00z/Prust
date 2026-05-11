@@ -14,7 +14,7 @@ pub struct FileHashes {
     pub authentihash: Option<String>,
 }
 
-/// Computes md5/sha256/imphash. Caller fills `authentihash` via `authentihash_sha256`.
+/// Computes md5, sha256, and imphash.
 pub fn compute(data: &[u8], imports: &[ImportEntry]) -> FileHashes {
     FileHashes {
         md5: md5_hex(data),
@@ -76,10 +76,8 @@ fn imphash(imports: &[ImportEntry]) -> Option<String> {
     Some(md5_hex(joined.as_bytes()))
 }
 
-// Authenticode SHA256: hash the file with CheckSum (4 bytes), SECURITY
-// directory entry (8 bytes), and the cert blob skipped. Sections are walked
-// in PointerToRawData order; the overlay (between last section and cert)
-// is hashed last.
+// Authenticode SHA256 excludes CheckSum, the SECURITY directory entry, and the
+// certificate blob. Sections are hashed in PointerToRawData order.
 
 const COFF_HEADER_SIZE: usize = 24;
 const CHECKSUM_OFFSET_IN_OPT: usize = 64;

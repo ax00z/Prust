@@ -77,7 +77,6 @@ fn walk(dir: &Path, depth: usize, lol_db: Option<&LolDriversDb>, entries: &mut V
 
         let path = entry.path();
 
-        // `file_type()` does not follow symlinks.
         let Ok(ft) = entry.file_type() else { continue };
 
         if ft.is_dir() {
@@ -187,7 +186,6 @@ fn run_triage(data: &[u8], lol_db: Option<&LolDriversDb>) -> BatchResult {
         })
         .collect();
 
-    // Skip hashing entirely when no DB is loaded.
     let loldrivers_match = lol_db.and_then(|db| {
         let mut file_hashes = hashes::compute(data, &imports);
         file_hashes.authentihash = hashes::authentihash_sha256(data, &opt, &sections, pe_offset);
@@ -386,7 +384,6 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// MZ prefix with e_lfanew past EOF: passes magic, fails full parse.
     fn make_mz_but_invalid_pe() -> Vec<u8> {
         let mut data = vec![0u8; 64];
         data[0] = 0x4D;

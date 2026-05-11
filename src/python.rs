@@ -1,4 +1,4 @@
-//! Python bindings, built by maturin and exported as the `prust` module.
+//! Python bindings for the `prust` module.
 
 use crate::{api, authenticode, hashes, loldrivers, pe};
 use pyo3::exceptions::{PyOSError, PyValueError};
@@ -11,8 +11,6 @@ fn read_file(path: &str) -> PyResult<Vec<u8>> {
     fs::read(path).map_err(|e| PyOSError::new_err(format!("cannot read {path}: {e}")))
 }
 
-/// Pieces that `hashes()` needs for imphash + authentihash. `None` for
-/// non-PE inputs so the caller can return missing hashes instead of raising.
 struct BestEffortPe {
     pe_offset: usize,
     opt: pe::OptionalHeader,
@@ -27,8 +25,7 @@ fn parse_pe_best_effort(data: &[u8]) -> Option<BestEffortPe> {
     let opt_offset = pe_offset + 24;
     let opt = pe::OptionalHeader::parse(data, opt_offset, coff.size_of_optional_header).ok()?;
     let sec_offset = pe::section_table_offset(pe_offset, coff.size_of_optional_header);
-    let sections =
-        pe::SectionHeader::parse_all(data, sec_offset, coff.number_of_sections).ok()?;
+    let sections = pe::SectionHeader::parse_all(data, sec_offset, coff.number_of_sections).ok()?;
     let imports = opt
         .data_directories
         .get(pe::DIR_IMPORT)
@@ -43,7 +40,6 @@ fn parse_pe_best_effort(data: &[u8]) -> Option<BestEffortPe> {
     })
 }
 
-/// Returns an error string instead of raising; the caller folds it into the dict.
 fn parse_optional_header(data: &[u8]) -> Result<pe::OptionalHeader, String> {
     let dos = pe::DosHeader::parse(data).map_err(|e| e.to_string())?;
     let pe_offset = dos.e_lfanew as usize;
@@ -55,7 +51,7 @@ fn parse_optional_header(data: &[u8]) -> Result<pe::OptionalHeader, String> {
 
 /// Returns `{md5, sha256, imphash, authentihash, file_size}`.
 /// `imphash` and `authentihash` are `None` when the file has no imports
-/// or isn't a parseable PE.
+/// or is not a parseable PE.
 #[pyfunction]
 #[pyo3(name = "hashes")]
 fn py_hashes(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
@@ -80,8 +76,8 @@ fn py_hashes(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
 }
 
 /// `status` is one of: `unsigned`, `malformed`, `present`, `parse_error`.
-/// `present` adds blob_size/win_cert_*/content_type_oid/is_signed_data;
-/// `malformed` and `parse_error` add an `error` string.
+/// `present` adds certificate fields.
+/// `malformed` and `parse_error` add `error`.
 #[pyfunction]
 #[pyo3(name = "signature")]
 fn py_signature(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
@@ -120,7 +116,6 @@ fn py_signature(py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
     Ok(dict.unbind())
 }
 
-/// Construct once and pass to `analyze(..., loldrivers=db)`.
 /// Corpus: https://www.loldrivers.io/api/drivers.json
 #[pyclass(name = "LolDriversDb", module = "prust")]
 struct PyLolDriversDb {
@@ -145,7 +140,7 @@ impl PyLolDriversDb {
     }
 }
 
-/// Returns a dict mirroring the CLI's `--json` output.
+/// Returns a dictionary matching the CLI `--json` output.
 /// `OSError` on read failure, `ValueError` on parse failure.
 #[pyfunction]
 #[pyo3(name = "analyze", signature = (path, loldrivers=None))]
